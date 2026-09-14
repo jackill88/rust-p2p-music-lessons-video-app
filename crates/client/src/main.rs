@@ -83,6 +83,12 @@ struct BridgeEvent {
     fps: u32,
     #[serde(default)]
     active: bool,
+    #[serde(default)]
+    remaining: u32,
+    #[serde(default)]
+    phase: String,
+    #[serde(default)]
+    gain: f32,
 }
 
 fn main() {
@@ -110,6 +116,10 @@ fn App() -> Element {
     let mut chat_log = use_signal(Vec::<(String, String)>::new);
     let mut facing = use_signal(|| "user");
     let mut feedback = use_signal(String::new);
+    let mut mic_gain = use_signal(|| 1.0f32);
+    let mut calibrating = use_signal(|| false);
+    let mut calibrate_remaining = use_signal(|| 0u32);
+    let mut calibrate_note = use_signal(String::new);
 
     let eval = use_hook(|| document::eval(SESSION_JS));
 
@@ -127,6 +137,10 @@ fn App() -> Element {
                     fps,
                     chat_log,
                     feedback,
+                    mic_gain,
+                    calibrating,
+                    calibrate_remaining,
+                    calibrate_note,
                 ),
                 Err(_) => break,
             }
@@ -161,6 +175,7 @@ fn App() -> Element {
                                     you,
                                     muted,
                                     camera_on,
+                                    mic_gain,
                                     chat_log,
                                     facing,
                                 )
@@ -183,6 +198,10 @@ fn App() -> Element {
                         chat_input,
                         chat_log,
                         feedback,
+                        mic_gain,
+                        calibrating,
+                        calibrate_remaining,
+                        calibrate_note,
                         on_leave: move |_| {
                             let _ = eval.send(serde_json::json!({ "op": "disconnect" }));
                             partner.set(None);
@@ -190,6 +209,10 @@ fn App() -> Element {
                             muted.set(false);
                             camera_on.set(true);
                             levels_on.set(true);
+                            mic_gain.set(1.0);
+                            calibrating.set(false);
+                            calibrate_remaining.set(0);
+                            calibrate_note.set(String::new());
                             chat_log.set(Vec::new());
                             feedback.set(String::new());
                             status.set("Disconnected.".into());
@@ -225,6 +248,33 @@ fn App() -> Element {
                                 let _ = document::eval(&format!(
                                     "if (window.__lessonSetLevels) {{ window.__lessonSetLevels({next}); }}"
                                 ))
+                                .await;
+                            });
+                        },
+                        on_gain: move |value: f32| {
+                            let next = value.clamp(0.25, 4.0);
+                            mic_gain.set(next);
+                            let _ = eval.send(serde_json::json!({ "op": "set_gain", "value": next }));
+                            spawn(async move {
+                                let _ = document::eval(&format!(
+                                    "if (window.__lessonSetGain) {{ window.__lessonSetGain({next}); }}"
+                                ))
+                                .await;
+                            });
+                        },
+                        on_calibrate: move |_| {
+                            if muted() {
+                                calibrate_note.set("Unmute the microphone before calibrating.".into());
+                                return;
+                            }
+                            calibrating.set(true);
+                            calibrate_remaining.set(4);
+                            calibrate_note.set("Now play loudly".into());
+                            let _ = eval.send(serde_json::json!({ "op": "calibrate" }));
+                            spawn(async move {
+                                let _ = document::eval(
+                                    "if (window.__lessonCalibrate) { window.__lessonCalibrate(); }",
+                                )
                                 .await;
                             });
                         },
@@ -265,6 +315,10 @@ fn apply_bridge_event(
     mut fps: Signal<u32>,
     mut chat_log: Signal<Vec<(String, String)>>,
     mut feedback: Signal<String>,
+    mut mic_gain: Signal<f32>,
+    mut calibrating: Signal<bool>,
+    mut calibrate_remaining: Signal<u32>,
+    mut calibrate_note: Signal<String>,
 ) {
     if event.event == "error" || event.msg_type == "error" {
         error.set(event.message.clone());
@@ -286,6 +340,37 @@ fn apply_bridge_event(
     if event.event == "stats" {
         kbps.set(event.kbps);
         fps.set(event.fps);
+        return;
+    }
+    if event.event == "gain" && event.gain > 0.0 {
+        mic_gain.set(event.gain.clamp(0.25, 4.0));
+        return;
+    }
+    if event.event == "calibrate" {
+        match event.phase.as_str() {
+            "play" => {
+                calibrating.set(true);
+                calibrate_remaining.set(event.remaining);
+                calibrate_note.set(event.message);
+            }
+            "done" => {
+                calibrating.set(false);
+                calibrate_remaining.set(0);
+                if event.gain > 0.0 {
+                    mic_gain.set(event.gain.clamp(0.25, 4.0));
+                }
+                calibrate_note.set(event.message);
+            }
+            "fail" => {
+                calibrating.set(false);
+                calibrate_remaining.set(0);
+                calibrate_note.set(event.message);
+            }
+            _ => {
+                calibrating.set(false);
+                calibrate_remaining.set(0);
+            }
+        }
         return;
     }
 
@@ -330,6 +415,7 @@ async fn start_lesson(
     mut you: Signal<Option<PeerInfo>>,
     mut muted: Signal<bool>,
     mut camera_on: Signal<bool>,
+    mut mic_gain: Signal<f32>,
     mut chat_log: Signal<Vec<(String, String)>>,
     mut facing: Signal<&'static str>,
 ) {
@@ -357,6 +443,7 @@ async fn start_lesson(
     you.set(None);
     muted.set(false);
     camera_on.set(true);
+    mic_gain.set(1.0);
     chat_log.set(Vec::new());
     status.set("Connecting...".into());
     screen.set(Screen::Lesson);
@@ -507,10 +594,16 @@ fn Lesson(
     chat_input: Signal<String>,
     chat_log: Signal<Vec<(String, String)>>,
     feedback: Signal<String>,
+    mic_gain: Signal<f32>,
+    calibrating: Signal<bool>,
+    calibrate_remaining: Signal<u32>,
+    calibrate_note: Signal<String>,
     on_leave: EventHandler<()>,
     on_mute: EventHandler<()>,
     on_camera: EventHandler<()>,
     on_levels: EventHandler<()>,
+    on_gain: EventHandler<f32>,
+    on_calibrate: EventHandler<()>,
     on_flip: EventHandler<()>,
     on_chat: EventHandler<()>,
 ) -> Element {
@@ -527,6 +620,7 @@ fn Lesson(
     let you_label = you()
         .map(|peer| format!("You · {} · {}", peer.role.label(), peer.instrument.label()))
         .unwrap_or_else(|| "You".into());
+    let gain_label = format!("{:.1}", mic_gain());
 
     rsx! {
         div { class: "stage",
@@ -571,6 +665,12 @@ fn Lesson(
                 }
                 div { class: "badge", "{you_label}" }
             }
+            if calibrating() {
+                div { class: "calibrate-banner",
+                    p { "Now play loudly" }
+                    p { class: "calibrate-count", "{calibrate_remaining}" }
+                }
+            }
         }
         div { class: "status-bar",
             span { "{status} · {fps} fps · {kbps} kb/s" }
@@ -593,6 +693,40 @@ fn Lesson(
             }
             button { class: "secondary", onclick: move |_| on_flip.call(()), "Flip camera" }
             button { class: "secondary", onclick: move |_| on_leave.call(()), "Leave" }
+        }
+        section { class: "card mic-card",
+            label { class: "field",
+                span { "Mic sensitivity · {gain_label}×" }
+                input {
+                    r#type: "range",
+                    min: "0.25",
+                    max: "4",
+                    step: "0.05",
+                    value: "{mic_gain}",
+                    disabled: calibrating(),
+                    oninput: move |event| {
+                        if let Ok(value) = event.value().parse::<f32>() {
+                            on_gain.call(value);
+                        }
+                    },
+                }
+            }
+            p { class: "hint",
+                "1.0× is the raw microphone. Raise it if the partner can barely hear you; lower it if loud notes clip."
+            }
+            button {
+                class: "secondary",
+                disabled: calibrating() || muted(),
+                onclick: move |_| on_calibrate.call(()),
+                if calibrating() {
+                    "Now play loudly ({calibrate_remaining})"
+                } else {
+                    "Play loudly to set level"
+                }
+            }
+            if !calibrate_note().is_empty() && !calibrating() {
+                p { class: "hint", "{calibrate_note}" }
+            }
         }
         section { class: "card chat",
             div { class: "chat-log",

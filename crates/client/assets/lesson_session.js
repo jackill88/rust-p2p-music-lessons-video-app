@@ -31,6 +31,16 @@ await (async function lessonSession() {
     meterTimer: 0,
     rtcLocalLevel: 0,
     rtcRemoteLevel: 0,
+    gain: 1,
+    gainNode: null,
+    rawSource: null,
+    destination: null,
+    processedStream: null,
+    preAnalyser: null,
+    preTime: null,
+    calibrating: false,
+    calibrateTimer: 0,
+    calibratePeak: 0,
   };
 
   function sendEvent(event) {
@@ -104,16 +114,55 @@ await (async function lessonSession() {
     return fallback;
   }
 
+  const MIN_GAIN = 0.25;
+  const MAX_GAIN = 4;
+  const TARGET_PEAK = 0.72;
+  const CALIBRATE_MS = 4000;
+
   function mediaStream() {
     return window.__lessonStream || state.stream;
   }
 
+  function clampGain(value) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) return 1;
+    return Math.min(MAX_GAIN, Math.max(MIN_GAIN, number));
+  }
+
+  function outgoingAudioTrack() {
+    if (state.processedStream) {
+      const processed = state.processedStream.getAudioTracks()[0];
+      if (processed) return processed;
+    }
+    const stream = mediaStream();
+    return stream ? stream.getAudioTracks()[0] : null;
+  }
+
+  function applyGainValue() {
+    if (!state.gainNode) return;
+    const value = state.muted ? 0 : state.gain;
+    if (state.audioCtx) {
+      state.gainNode.gain.setTargetAtTime(value, state.audioCtx.currentTime, 0.02);
+    } else {
+      state.gainNode.gain.value = value;
+    }
+  }
+
+  function setGain(value, announce) {
+    state.gain = clampGain(value);
+    applyGainValue();
+    if (announce !== false) {
+      sendEvent({ event: "gain", gain: state.gain });
+    }
+  }
+
   async function applyMediaFlags() {
     const stream = mediaStream();
-    const audioTrack = stream ? stream.getAudioTracks()[0] : null;
+    const audioTrack = outgoingAudioTrack();
     const videoTrack = stream ? stream.getVideoTracks()[0] : null;
     if (audioTrack) audioTrack.enabled = !state.muted;
     if (videoTrack) videoTrack.enabled = state.cameraEnabled;
+    applyGainValue();
 
     if (state.audioSender) {
       try {
@@ -135,6 +184,7 @@ await (async function lessonSession() {
     }
     if (state.muted) {
       publishFeedback(false);
+      stopCalibrate(true);
     }
   }
 
@@ -153,6 +203,174 @@ await (async function lessonSession() {
   ["pointerdown", "touchstart", "click"].forEach((eventName) => {
     window.addEventListener(eventName, ensureAudioContext, true);
   });
+
+  function stopCalibrate(silent) {
+    if (state.calibrateTimer) {
+      window.clearInterval(state.calibrateTimer);
+      state.calibrateTimer = 0;
+    }
+    state.calibrating = false;
+    if (!silent) {
+      sendEvent({ event: "calibrate", phase: "idle", remaining: 0, message: "" });
+    }
+  }
+
+  function teardownLocalGraph() {
+    stopCalibrate(true);
+    if (state.rawSource) {
+      try {
+        state.rawSource.disconnect();
+      } catch (_) {}
+      state.rawSource = null;
+    }
+    if (state.gainNode) {
+      try {
+        state.gainNode.disconnect();
+      } catch (_) {}
+      state.gainNode = null;
+    }
+    state.destination = null;
+    state.processedStream = null;
+    state.preAnalyser = null;
+    state.preTime = null;
+    state.localAnalyser = null;
+    state.localTime = null;
+    state.localFreq = null;
+  }
+
+  function buildLocalAudioGraph() {
+    const ctx = ensureAudioContext();
+    const stream = mediaStream();
+    if (!ctx || !stream || !stream.getAudioTracks().length) return;
+    teardownLocalGraph();
+    try {
+      const source = ctx.createMediaStreamSource(stream);
+      const preAnalyser = ctx.createAnalyser();
+      preAnalyser.fftSize = 2048;
+      preAnalyser.smoothingTimeConstant = 0;
+      const gain = ctx.createGain();
+      gain.gain.value = state.muted ? 0 : state.gain;
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 2048;
+      analyser.smoothingTimeConstant = 0.4;
+      const dest = ctx.createMediaStreamDestination();
+      source.connect(preAnalyser);
+      source.connect(gain);
+      gain.connect(analyser);
+      gain.connect(dest);
+      state.rawSource = source;
+      state.gainNode = gain;
+      state.preAnalyser = preAnalyser;
+      state.preTime = new Float32Array(preAnalyser.fftSize);
+      state.destination = dest;
+      state.processedStream = dest.stream;
+      state.localAnalyser = analyser;
+      state.localTime = new Float32Array(analyser.fftSize);
+      state.localFreq = new Uint8Array(analyser.frequencyBinCount);
+    } catch (_) {
+      tapStream("local", stream);
+    }
+  }
+
+  function samplePeak(analyser, buffer) {
+    if (!analyser || !buffer) return 0;
+    analyser.getFloatTimeDomainData(buffer);
+    let peak = 0;
+    for (let i = 0; i < buffer.length; i++) {
+      const magnitude = Math.abs(buffer[i]);
+      if (magnitude > peak) peak = magnitude;
+    }
+    return peak;
+  }
+
+  function finishCalibrate() {
+    stopCalibrate(true);
+    const peak = state.calibratePeak;
+    if (peak < 0.08) {
+      sendEvent({
+        event: "calibrate",
+        phase: "fail",
+        remaining: 0,
+        message: "Too quiet. Play a loud note and try again.",
+      });
+      return;
+    }
+    const next = clampGain(TARGET_PEAK / peak);
+    setGain(next, true);
+    sendEvent({
+      event: "calibrate",
+      phase: "done",
+      remaining: 0,
+      gain: next,
+      message:
+        "Sensitivity set to " +
+        next.toFixed(1) +
+        "×. Loud notes should sit near the top of the meter.",
+    });
+  }
+
+  function startCalibrate() {
+    if (state.muted) {
+      sendEvent({
+        event: "calibrate",
+        phase: "fail",
+        remaining: 0,
+        message: "Unmute the microphone before calibrating.",
+      });
+      return;
+    }
+    if (!state.preAnalyser) {
+      buildLocalAudioGraph();
+    }
+    if (!state.preAnalyser) {
+      sendEvent({
+        event: "calibrate",
+        phase: "fail",
+        remaining: 0,
+        message: "Could not listen to the microphone.",
+      });
+      return;
+    }
+    stopCalibrate(true);
+    state.calibrating = true;
+    state.calibratePeak = 0;
+    const started = Date.now();
+    let lastSecond = 4;
+    sendEvent({
+      event: "calibrate",
+      phase: "play",
+      remaining: 4,
+      message: "Now play loudly",
+    });
+    state.calibrateTimer = window.setInterval(() => {
+      if (state.muted) {
+        stopCalibrate(true);
+        sendEvent({
+          event: "calibrate",
+          phase: "fail",
+          remaining: 0,
+          message: "Unmute the microphone before calibrating.",
+        });
+        return;
+      }
+      const peak = samplePeak(state.preAnalyser, state.preTime);
+      if (peak > state.calibratePeak) state.calibratePeak = peak;
+      const left = Math.max(0, CALIBRATE_MS - (Date.now() - started));
+      const seconds = Math.max(0, Math.ceil(left / 1000));
+      if (seconds !== lastSecond) {
+        lastSecond = seconds;
+        sendEvent({
+          event: "calibrate",
+          phase: "play",
+          remaining: seconds,
+          message: "Now play loudly",
+        });
+      }
+      if (left <= 0) {
+        finishCalibrate();
+      }
+    }, 80);
+  }
 
   function disconnectTap(kind) {
     const sourceKey = kind === "remote" ? "remoteSource" : "localSource";
@@ -191,9 +409,8 @@ await (async function lessonSession() {
   }
 
   function stopAudioMonitor() {
-    disconnectTap("local");
+    teardownLocalGraph();
     disconnectTap("remote");
-    state.localAnalyser = null;
     state.remoteAnalyser = null;
     paintMeter("local-level-fill", 0);
     paintMeter("remote-level-fill", 0);
@@ -396,11 +613,15 @@ await (async function lessonSession() {
     state.pc = pc;
     state.audioSender = null;
     state.videoSender = null;
-    state.stream.getTracks().forEach((track) => {
-      const sender = pc.addTrack(track, state.stream);
-      if (track.kind === "audio") state.audioSender = sender;
-      if (track.kind === "video") state.videoSender = sender;
-    });
+    buildLocalAudioGraph();
+    const videoTrack = state.stream.getVideoTracks()[0];
+    if (videoTrack) {
+      state.videoSender = pc.addTrack(videoTrack, state.stream);
+    }
+    const audioTrack = outgoingAudioTrack();
+    if (audioTrack) {
+      state.audioSender = pc.addTrack(audioTrack, state.processedStream || state.stream);
+    }
     preferH264(pc);
     await tuneSenders(pc);
     await applyMediaFlags();
@@ -506,13 +727,15 @@ await (async function lessonSession() {
     state.muted = false;
     state.cameraEnabled = true;
     state.levelsEnabled = true;
+    state.gain = 1;
     state.partnerPresent = false;
     state.stream = window.__lessonStream || null;
     if (!state.stream) {
       throw new Error("Camera and microphone were not started");
     }
     attachLocalPreview();
-    tapStream("local", state.stream);
+    buildLocalAudioGraph();
+    sendEvent({ event: "gain", gain: state.gain });
 
     const socketUrl = secureSocketUrl(cmd.url);
     await new Promise((resolve, reject) => {
@@ -609,11 +832,17 @@ await (async function lessonSession() {
   async function applyStream() {
     state.stream = window.__lessonStream || state.stream;
     attachLocalPreview();
-    tapStream("local", state.stream);
+    buildLocalAudioGraph();
     const videoTrack = state.stream ? state.stream.getVideoTracks()[0] : null;
     if (videoTrack && state.videoSender && state.cameraEnabled) {
       try {
         await state.videoSender.replaceTrack(videoTrack);
+      } catch (_) {}
+    }
+    const audioTrack = outgoingAudioTrack();
+    if (audioTrack && state.audioSender && !state.muted) {
+      try {
+        await state.audioSender.replaceTrack(audioTrack);
       } catch (_) {}
     }
     await applyMediaFlags();
@@ -637,6 +866,13 @@ await (async function lessonSession() {
     } else {
       sampleMeters();
     }
+  };
+
+  window.__lessonSetGain = (value) => {
+    setGain(value, false);
+  };
+  window.__lessonCalibrate = () => {
+    startCalibrate();
   };
 
   while (true) {
@@ -667,6 +903,10 @@ await (async function lessonSession() {
         await applyStream();
       } else if (cmd.op === "set_levels") {
         window.__lessonSetLevels(cmd.enabled);
+      } else if (cmd.op === "set_gain") {
+        setGain(cmd.value, false);
+      } else if (cmd.op === "calibrate") {
+        startCalibrate();
       }
     } catch (err) {
       sendEvent({

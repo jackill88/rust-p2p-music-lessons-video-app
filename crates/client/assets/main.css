@@ -313,6 +313,43 @@ button:disabled {
   transition: width 80ms linear;
 }
 
+.calibrate-banner {
+  position: absolute;
+  left: 50%;
+  top: 18%;
+  transform: translateX(-50%);
+  z-index: 6;
+  min-width: min(80%, 18rem);
+  padding: 0.9rem 1.1rem 1rem;
+  border-radius: 1rem;
+  text-align: center;
+  background: rgba(22, 17, 13, 0.9);
+  border: 1px solid var(--gold);
+  pointer-events: none;
+}
+
+.calibrate-banner p {
+  margin: 0;
+  font-family: "Segoe UI", system-ui, sans-serif;
+  font-weight: 700;
+  color: var(--gold-strong);
+}
+
+.calibrate-count {
+  margin-top: 0.35rem !important;
+  font-size: 2rem;
+  letter-spacing: 0.04em;
+}
+
+.mic-card input[type="range"] {
+  width: 100%;
+  accent-color: var(--gold);
+}
+
+.mic-card button {
+  margin-top: 0.35rem;
+}
+
 .toolbar {
   display: flex;
   gap: 0.6rem;
