@@ -129,6 +129,8 @@ Camera access in a browser only works on a secure origin (usually `http://127.0.
 
 A third client is rejected until someone leaves. If Leave does not reach the server (Wi-Fi change, sleep, etc.), join again with the **same name** — that reclaims your seat. Dropped sockets are also cleared after a few seconds of silence.
 
+The client checks the mic against the speaker once a second. If it hears a feedback loop it asks you to use headphones or turn the speaker down; playing piano or guitar by itself should not trigger that warning.
+
 ## Quick local test
 
 Terminal 1:
