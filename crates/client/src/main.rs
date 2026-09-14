@@ -85,6 +85,8 @@ struct BridgeEvent {
     kbps: u32,
     #[serde(default)]
     fps: u32,
+    #[serde(default)]
+    active: bool,
 }
 
 fn main() {
@@ -112,6 +114,7 @@ fn App() -> Element {
     let mut chat_input = use_signal(String::new);
     let mut chat_log = use_signal(Vec::<(String, String)>::new);
     let mut facing = use_signal(|| "user");
+    let mut feedback = use_signal(String::new);
 
     let eval = use_hook(|| document::eval(SESSION_JS));
 
@@ -130,6 +133,7 @@ fn App() -> Element {
                     kbps,
                     fps,
                     chat_log,
+                    feedback,
                 ),
                 Err(_) => break,
             }
@@ -186,6 +190,7 @@ fn App() -> Element {
                         fps,
                         chat_input,
                         chat_log,
+                        feedback,
                         on_leave: move |_| {
                             let _ = eval.send(serde_json::json!({ "op": "disconnect" }));
                             partner.set(None);
@@ -193,6 +198,7 @@ fn App() -> Element {
                             muted.set(false);
                             camera_on.set(true);
                             chat_log.set(Vec::new());
+                            feedback.set(String::new());
                             status.set("Disconnected.".into());
                             screen.set(Screen::Lobby);
                         },
@@ -256,6 +262,7 @@ fn apply_bridge_event(
     mut kbps: Signal<u32>,
     mut fps: Signal<u32>,
     mut chat_log: Signal<Vec<(String, String)>>,
+    mut feedback: Signal<String>,
 ) {
     if event.event == "error" || event.msg_type == "error" {
         error.set(event.message.clone());
@@ -268,9 +275,15 @@ fn apply_bridge_event(
     }
     if event.event == "levels" {
         local_level.set(event.local);
-        if event.remote > 0.0 {
-            remote_level.set(event.remote);
-        }
+        remote_level.set(event.remote);
+        return;
+    }
+    if event.event == "feedback" {
+        feedback.set(if event.active {
+            event.message
+        } else {
+            String::new()
+        });
         return;
     }
     if event.event == "stats" {
@@ -497,6 +510,7 @@ fn Lesson(
     fps: Signal<u32>,
     chat_input: Signal<String>,
     chat_log: Signal<Vec<(String, String)>>,
+    feedback: Signal<String>,
     on_leave: EventHandler<()>,
     on_mute: EventHandler<()>,
     on_camera: EventHandler<()>,
@@ -564,6 +578,9 @@ fn Lesson(
         }
         if !error().is_empty() {
             p { class: "error", "{error}" }
+        }
+        if !feedback().is_empty() {
+            p { class: "warning", "{feedback}" }
         }
         div { class: "toolbar",
             button { class: "secondary", onclick: move |_| on_mute.call(()),

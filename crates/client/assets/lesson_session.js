@@ -15,6 +15,18 @@ await (async function lessonSession() {
     framesWindow: 0,
     lastRtcBytes: 0,
     lastRtcTime: 0,
+    audioCtx: null,
+    localSource: null,
+    localAnalyser: null,
+    remoteSource: null,
+    remoteAnalyser: null,
+    localTime: null,
+    localFreq: null,
+    remoteTime: null,
+    remoteFreq: null,
+    feedbackHits: 0,
+    feedbackQuiet: 0,
+    feedbackActive: false,
   };
 
   function sendEvent(event) {
@@ -117,6 +129,184 @@ await (async function lessonSession() {
         }
       }
     }
+    if (state.muted) {
+      publishFeedback(false);
+    }
+  }
+
+  function ensureAudioContext() {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return null;
+    if (!state.audioCtx) {
+      state.audioCtx = new Ctx();
+    }
+    if (state.audioCtx.state === "suspended") {
+      state.audioCtx.resume().catch(() => {});
+    }
+    return state.audioCtx;
+  }
+
+  function disconnectTap(kind) {
+    const sourceKey = kind === "remote" ? "remoteSource" : "localSource";
+    if (state[sourceKey]) {
+      try {
+        state[sourceKey].disconnect();
+      } catch (_) {}
+      state[sourceKey] = null;
+    }
+  }
+
+  function tapStream(kind, stream) {
+    const ctx = ensureAudioContext();
+    const track = stream && stream.getAudioTracks()[0];
+    if (!ctx || !track) return;
+    disconnectTap(kind);
+    const source = ctx.createMediaStreamSource(new MediaStream([track]));
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 2048;
+    analyser.smoothingTimeConstant = 0.65;
+    source.connect(analyser);
+    if (kind === "remote") {
+      state.remoteSource = source;
+      state.remoteAnalyser = analyser;
+      state.remoteTime = new Uint8Array(analyser.fftSize);
+      state.remoteFreq = new Uint8Array(analyser.frequencyBinCount);
+    } else {
+      state.localSource = source;
+      state.localAnalyser = analyser;
+      state.localTime = new Uint8Array(analyser.fftSize);
+      state.localFreq = new Uint8Array(analyser.frequencyBinCount);
+    }
+  }
+
+  function stopAudioMonitor() {
+    disconnectTap("local");
+    disconnectTap("remote");
+    state.localAnalyser = null;
+    state.remoteAnalyser = null;
+    sendEvent({ event: "levels", local: 0, remote: 0 });
+    publishFeedback(false);
+  }
+
+  function timeRms(analyser, buffer) {
+    analyser.getByteTimeDomainData(buffer);
+    let sum = 0;
+    for (let i = 0; i < buffer.length; i++) {
+      const sample = (buffer[i] - 128) / 128;
+      sum += sample * sample;
+    }
+    return Math.sqrt(sum / buffer.length);
+  }
+
+  function bandRange(analyser) {
+    const rate = (state.audioCtx && state.audioCtx.sampleRate) || 48000;
+    const binHz = rate / analyser.fftSize;
+    const from = Math.max(1, Math.floor(160 / binHz));
+    const to = Math.min(analyser.frequencyBinCount, Math.ceil(5500 / binHz));
+    return { from, to };
+  }
+
+  function peakInfo(spectrum, from, to) {
+    let max = 0;
+    let index = from;
+    let sum = 0;
+    const count = Math.max(1, to - from);
+    for (let i = from; i < to; i++) {
+      const value = spectrum[i];
+      sum += value;
+      if (value > max) {
+        max = value;
+        index = i;
+      }
+    }
+    const mean = sum / count;
+    return { max, index, ratio: mean > 4 ? max / mean : 0 };
+  }
+
+  function cosine(left, right, from, to) {
+    let dot = 0;
+    let leftNorm = 0;
+    let rightNorm = 0;
+    for (let i = from; i < to; i++) {
+      const a = left[i];
+      const b = right[i];
+      dot += a * b;
+      leftNorm += a * a;
+      rightNorm += b * b;
+    }
+    if (leftNorm < 8 || rightNorm < 8) return 0;
+    return dot / Math.sqrt(leftNorm * rightNorm);
+  }
+
+  function publishFeedback(active) {
+    if (active === state.feedbackActive && (active || state.feedbackHits === 0)) {
+      if (!active) {
+        state.feedbackHits = 0;
+        state.feedbackQuiet = 0;
+      }
+      return;
+    }
+    if (!active) {
+      state.feedbackHits = 0;
+      state.feedbackQuiet = 0;
+    }
+    state.feedbackActive = active;
+    sendEvent({
+      event: "feedback",
+      active,
+      message: active
+        ? "Feedback loop detected. Put on headphones or turn the speaker down."
+        : "",
+    });
+  }
+
+  function sampleAudio() {
+    const localAnalyser = state.localAnalyser;
+    const localRms =
+      localAnalyser && state.localTime ? timeRms(localAnalyser, state.localTime) : 0;
+    const remoteAnalyser = state.remoteAnalyser;
+    const remoteRms =
+      remoteAnalyser && state.remoteTime ? timeRms(remoteAnalyser, state.remoteTime) : 0;
+    sendEvent({
+      event: "levels",
+      local: Math.min(1, localRms * 4.5),
+      remote: Math.min(1, remoteRms * 4.5),
+    });
+
+    if (state.muted || !localAnalyser || !remoteAnalyser) {
+      if (state.feedbackActive) publishFeedback(false);
+      return;
+    }
+
+    localAnalyser.getByteFrequencyData(state.localFreq);
+    remoteAnalyser.getByteFrequencyData(state.remoteFreq);
+    const { from, to } = bandRange(localAnalyser);
+    const localPeak = peakInfo(state.localFreq, from, to);
+    const remotePeak = peakInfo(state.remoteFreq, from, to);
+    const similar = cosine(state.localFreq, state.remoteFreq, from, to);
+    const sharedPeak = Math.abs(localPeak.index - remotePeak.index) <= 2;
+    const looping =
+      localRms > 0.045 &&
+      remoteRms > 0.045 &&
+      similar > 0.84 &&
+      sharedPeak &&
+      localPeak.ratio > 3 &&
+      remotePeak.ratio > 3 &&
+      localPeak.max > 132 &&
+      remotePeak.max > 132;
+
+    if (looping) {
+      state.feedbackHits += 1;
+      state.feedbackQuiet = 0;
+      if (state.feedbackHits >= 2) {
+        publishFeedback(true);
+      }
+    } else if (state.feedbackActive || state.feedbackHits > 0) {
+      state.feedbackQuiet += 1;
+      if (state.feedbackQuiet >= 3) {
+        publishFeedback(false);
+      }
+    }
   }
 
   function preferH264(pc) {
@@ -204,6 +394,7 @@ await (async function lessonSession() {
       }
       state.usingRtc = true;
       setRemoteVisible(true);
+      tapStream("remote", remote);
       sendEvent({ event: "status", message: "Live peer-to-peer (WebRTC)." });
     };
     pc.onconnectionstatechange = () => {
@@ -258,6 +449,9 @@ await (async function lessonSession() {
       if (!state.partnerPresent) {
         clearRemote();
         stopRtc();
+        disconnectTap("remote");
+        state.remoteAnalyser = null;
+        publishFeedback(false);
       }
     } else if (message.type === "partner_joined") {
       state.partnerPresent = true;
@@ -267,6 +461,9 @@ await (async function lessonSession() {
     } else if (message.type === "partner_left") {
       state.partnerPresent = false;
       stopRtc();
+      disconnectTap("remote");
+      state.remoteAnalyser = null;
+      publishFeedback(false);
       clearRemote();
     } else if (message.type === "signal") {
       handleSignal(message).catch((err) =>
@@ -286,6 +483,7 @@ await (async function lessonSession() {
       throw new Error("Camera and microphone were not started");
     }
     attachLocalPreview();
+    tapStream("local", state.stream);
 
     const socketUrl = secureSocketUrl(cmd.url);
     await new Promise((resolve, reject) => {
@@ -336,6 +534,7 @@ await (async function lessonSession() {
         kbps: Math.round((state.bytesWindow * 8) / 1000),
         fps: state.framesWindow,
       });
+      sampleAudio();
       if (!state.usingRtc) {
         state.bytesWindow = 0;
         state.framesWindow = 0;
@@ -359,11 +558,13 @@ await (async function lessonSession() {
       state.ws = null;
     }
     clearRemote();
+    stopAudioMonitor();
   }
 
   async function applyStream() {
     state.stream = window.__lessonStream || state.stream;
     attachLocalPreview();
+    tapStream("local", state.stream);
     const videoTrack = state.stream ? state.stream.getVideoTracks()[0] : null;
     if (videoTrack && state.videoSender && state.cameraEnabled) {
       try {
