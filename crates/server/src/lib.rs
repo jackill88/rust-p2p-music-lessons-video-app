@@ -123,6 +123,13 @@ pub async fn handle_socket(socket: WebSocket, studio: Arc<Studio>) {
                 Ok(ClientMessage::Chat { text }) => {
                     studio.chat(&session, text).await;
                 }
+                Ok(ClientMessage::Signal {
+                    kind,
+                    sdp,
+                    candidate,
+                }) => {
+                    studio.signal(&session, kind, sdp, candidate).await;
+                }
                 Err(err) => {
                     tracing::warn!(error = %err, payload = %text, "invalid client message");
                     studio.send_error(&session, format!("Invalid message: {err}"));

@@ -45,7 +45,7 @@ pub struct PeerInfo {
     pub instrument: Instrument,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMessage {
     Join {
@@ -56,9 +56,16 @@ pub enum ClientMessage {
     Chat {
         text: String,
     },
+    Signal {
+        kind: String,
+        #[serde(default)]
+        sdp: Option<String>,
+        #[serde(default)]
+        candidate: Option<serde_json::Value>,
+    },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMessage {
     Welcome {
@@ -72,6 +79,13 @@ pub enum ServerMessage {
     Chat {
         from: String,
         text: String,
+    },
+    Signal {
+        kind: String,
+        #[serde(default)]
+        sdp: Option<String>,
+        #[serde(default)]
+        candidate: Option<serde_json::Value>,
     },
     Error {
         message: String,

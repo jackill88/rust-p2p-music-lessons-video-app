@@ -72,6 +72,26 @@ impl Studio {
         }
     }
 
+    pub async fn signal(
+        &self,
+        session: &Session,
+        kind: String,
+        sdp: Option<String>,
+        candidate: Option<serde_json::Value>,
+    ) {
+        let inner = self.inner.lock().await;
+        if let Some(partner) = inner.partner(session.id) {
+            send_json(
+                &partner.tx,
+                &ServerMessage::Signal {
+                    kind,
+                    sdp,
+                    candidate,
+                },
+            );
+        }
+    }
+
     pub async fn chat(&self, session: &Session, text: String) {
         let inner = self.inner.lock().await;
         let Some(from) = inner

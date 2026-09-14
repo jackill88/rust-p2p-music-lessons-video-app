@@ -107,6 +107,24 @@ async fn two_clients_pair_and_relay_media() {
         Some(Ok(Message::Binary(payload))) => assert_eq!(&payload[..], audio.as_slice()),
         other => panic!("student should receive audio bytes: {other:?}"),
     }
+
+    let signal = serde_json::to_string(&ClientMessage::Signal {
+        kind: "offer".into(),
+        sdp: Some("v=0".into()),
+        candidate: None,
+    })
+    .unwrap();
+    teacher_write
+        .send(Message::Text(signal.into()))
+        .await
+        .unwrap();
+    match recv_server_message(&mut student_read).await {
+        ServerMessage::Signal { kind, sdp, .. } => {
+            assert_eq!(kind, "offer");
+            assert_eq!(sdp.as_deref(), Some("v=0"));
+        }
+        other => panic!("student should receive WebRTC signal: {other:?}"),
+    }
 }
 
 #[tokio::test]

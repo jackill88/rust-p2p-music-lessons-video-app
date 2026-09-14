@@ -102,6 +102,7 @@ patch_android_manifest() {
   fi
 
   ensure_manifest_permission "$manifest" "android.permission.INTERNET"
+  ensure_manifest_permission "$manifest" "android.permission.ACCESS_NETWORK_STATE"
   ensure_manifest_permission "$manifest" "android.permission.CAMERA"
   ensure_manifest_permission "$manifest" "android.permission.RECORD_AUDIO"
   ensure_manifest_permission "$manifest" "android.permission.MODIFY_AUDIO_SETTINGS"

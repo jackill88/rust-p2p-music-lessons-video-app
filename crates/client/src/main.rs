@@ -371,7 +371,7 @@ async fn request_media(facing: &str) -> bool {
                 video: {{
                     width: {{ ideal: 1280 }},
                     height: {{ ideal: 720 }},
-                    frameRate: {{ ideal: 24 }},
+                    frameRate: {{ ideal: 30 }},
                     facingMode: "{facing}"
                 }}
             }});
@@ -509,6 +509,12 @@ fn Lesson(
 
     rsx! {
         div { class: "stage",
+            video {
+                id: "remote-video",
+                class: "remote-video",
+                autoplay: true,
+                playsinline: true,
+            }
             img { id: "remote-frame", class: "remote-frame", alt: "Remote camera" }
             div { id: "remote-placeholder", class: "placeholder",
                 div {
