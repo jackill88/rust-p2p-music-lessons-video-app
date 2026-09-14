@@ -1,4 +1,3 @@
-use bytes::Bytes;
 use lesson_protocol::{PeerInfo, ServerMessage, MAX_PEERS};
 use tokio::sync::mpsc;
 use tokio::sync::Mutex;
@@ -6,7 +5,6 @@ use tokio::sync::Mutex;
 #[derive(Clone)]
 pub enum Outbound {
     Text(String),
-    Binary(Bytes),
 }
 
 struct Peer {
@@ -102,13 +100,6 @@ impl Studio {
         };
         if let Some(partner) = inner.partner(session.id) {
             send_json(&partner.tx, &ServerMessage::Chat { from, text });
-        }
-    }
-
-    pub async fn forward_binary(&self, session: &Session, payload: Bytes) {
-        let inner = self.inner.lock().await;
-        if let Some(partner) = inner.partner(session.id) {
-            let _ = partner.tx.send(Outbound::Binary(payload));
         }
     }
 

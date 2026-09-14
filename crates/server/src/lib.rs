@@ -10,7 +10,6 @@ use axum::{
     routing::get,
     Router,
 };
-use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
 use lesson_protocol::{ClientMessage, DEFAULT_PORT};
 use std::sync::Arc;
@@ -89,12 +88,8 @@ pub async fn handle_socket(socket: WebSocket, studio: Arc<Studio>) {
     };
 
     let write_task = tokio::spawn(async move {
-        while let Some(message) = outbound_rx.recv().await {
-            let ws_message = match message {
-                Outbound::Text(text) => Message::Text(text.into()),
-                Outbound::Binary(bytes) => Message::Binary(bytes),
-            };
-            if sender.send(ws_message).await.is_err() {
+        while let Some(Outbound::Text(text)) = outbound_rx.recv().await {
+            if sender.send(Message::Text(text.into())).await.is_err() {
                 break;
             }
         }
@@ -135,11 +130,8 @@ pub async fn handle_socket(socket: WebSocket, studio: Arc<Studio>) {
                     studio.send_error(&session, format!("Invalid message: {err}"));
                 }
             },
-            Message::Binary(payload) => {
-                studio.forward_binary(&session, Bytes::from(payload)).await;
-            }
             Message::Close(_) => break,
-            Message::Ping(_) | Message::Pong(_) => {}
+            Message::Binary(_) | Message::Ping(_) | Message::Pong(_) => {}
         }
     }
 

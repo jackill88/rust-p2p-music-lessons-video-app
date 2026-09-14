@@ -3,13 +3,9 @@ await (async function lessonSession() {
     ws: null,
     pc: null,
     stream: null,
-    audio: null,
-    videoTimer: 0,
     statsTimer: 0,
-    iceTimer: 0,
     partnerPresent: false,
     usingRtc: false,
-    jpegBusy: false,
     facing: "environment",
     muted: false,
     cameraEnabled: true,
@@ -17,7 +13,6 @@ await (async function lessonSession() {
     framesWindow: 0,
     lastRtcBytes: 0,
     lastRtcTime: 0,
-    remoteObjectUrl: "",
   };
 
   function sendEvent(event) {
@@ -66,32 +61,23 @@ await (async function lessonSession() {
   }
 
   function setRemoteVisible(visible) {
-    const img = $("remote-frame");
     const video = $("remote-video");
     const placeholder = $("remote-placeholder");
-    if (video) {
-      video.style.display = visible && state.usingRtc ? "block" : "none";
-    }
-    if (img) {
-      img.style.display = visible && !state.usingRtc ? "block" : "none";
-    }
-    if (placeholder) {
-      placeholder.style.display = visible ? "none" : "grid";
-    }
+    if (video) video.style.display = visible ? "block" : "none";
+    if (placeholder) placeholder.style.display = visible ? "none" : "grid";
   }
 
   function clearRemote() {
-    const img = $("remote-frame");
     const video = $("remote-video");
-    if (img) img.removeAttribute("src");
-    if (video) {
-      video.srcObject = null;
-    }
-    if (state.remoteObjectUrl) {
-      URL.revokeObjectURL(state.remoteObjectUrl);
-      state.remoteObjectUrl = "";
-    }
+    if (video) video.srcObject = null;
     setRemoteVisible(false);
+  }
+
+  function rtcUnavailable(reason) {
+    sendEvent({
+      event: "error",
+      message: reason || "WebRTC is required for Lesson Studio.",
+    });
   }
 
   function preferH264(pc) {
@@ -129,8 +115,6 @@ await (async function lessonSession() {
   }
 
   function stopRtc() {
-    window.clearTimeout(state.iceTimer);
-    state.iceTimer = 0;
     if (state.pc) {
       try {
         state.pc.close();
@@ -140,68 +124,12 @@ await (async function lessonSession() {
     state.usingRtc = false;
   }
 
-  function startJpegFallback() {
-    if (state.videoTimer) return;
-    sendEvent({
-      event: "status",
-      message: "Live over the studio server (JPEG fallback).",
-    });
-    const canvas = document.createElement("canvas");
-    const ctx = canvas.getContext("2d", { alpha: false });
-    const pump = () => {
-      state.videoTimer = window.requestAnimationFrame(pump);
-      if (state.usingRtc || state.jpegBusy) return;
-      if (!state.partnerPresent || !state.cameraEnabled) return;
-      if (!state.ws || state.ws.readyState !== 1) return;
-      const video = $("local-preview");
-      if (!video || !video.videoWidth) return;
-      state.jpegBusy = true;
-      const maxW = 640;
-      const scale = Math.min(1, maxW / video.videoWidth);
-      canvas.width = Math.max(2, Math.round(video.videoWidth * scale) & ~1);
-      canvas.height = Math.max(2, Math.round(video.videoHeight * scale) & ~1);
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-      canvas.toBlob(
-        async (blob) => {
-          try {
-            if (!blob || state.usingRtc || !state.ws || state.ws.readyState !== 1) return;
-            const jpeg = new Uint8Array(await blob.arrayBuffer());
-            const packet = new Uint8Array(9 + jpeg.byteLength);
-            const view = new DataView(packet.buffer);
-            packet[0] = 1;
-            view.setUint32(1, Date.now() >>> 0);
-            view.setUint16(5, canvas.width);
-            view.setUint16(7, canvas.height);
-            packet.set(jpeg, 9);
-            state.ws.send(packet);
-            state.bytesWindow += packet.byteLength;
-            state.framesWindow += 1;
-          } finally {
-            state.jpegBusy = false;
-          }
-        },
-        "image/jpeg",
-        0.55
-      );
-    };
-    state.videoTimer = window.requestAnimationFrame(pump);
-  }
-
-  function stopJpegFallback() {
-    if (state.videoTimer) {
-      window.cancelAnimationFrame(state.videoTimer);
-      state.videoTimer = 0;
-    }
-    state.jpegBusy = false;
-  }
-
   async function startRtc(initiator) {
     if (!window.RTCPeerConnection || !state.stream) {
-      startJpegFallback();
+      rtcUnavailable("This device cannot start a live WebRTC lesson.");
       return;
     }
     stopRtc();
-    stopJpegFallback();
     const pc = new RTCPeerConnection({
       iceServers: [],
       bundlePolicy: "max-bundle",
@@ -226,18 +154,16 @@ await (async function lessonSession() {
         video.play().catch(() => {});
       }
       state.usingRtc = true;
-      stopJpegFallback();
       setRemoteVisible(true);
       sendEvent({ event: "status", message: "Live peer-to-peer (WebRTC)." });
     };
     pc.onconnectionstatechange = () => {
       if (pc.connectionState === "connected") {
         state.usingRtc = true;
-        stopJpegFallback();
         sendEvent({ event: "status", message: "Live peer-to-peer (WebRTC)." });
       }
-      if (pc.connectionState === "failed" || pc.connectionState === "disconnected") {
-        startJpegFallback();
+      if (pc.connectionState === "failed") {
+        rtcUnavailable("Live connection failed. Stay on the same Wi-Fi and join again.");
       }
     };
 
@@ -249,13 +175,6 @@ await (async function lessonSession() {
       await pc.setLocalDescription(offer);
       sendSignal({ kind: "offer", sdp: offer.sdp });
     }
-
-    window.clearTimeout(state.iceTimer);
-    state.iceTimer = window.setTimeout(() => {
-      if (!state.usingRtc) {
-        startJpegFallback();
-      }
-    }, 4000);
   }
 
   async function handleSignal(message) {
@@ -283,25 +202,6 @@ await (async function lessonSession() {
     }
   }
 
-  function handleBinary(buffer) {
-    if (state.usingRtc) return;
-    const bytes = new Uint8Array(buffer);
-    if (bytes.length < 2 || bytes[0] !== 1) return;
-    const jpeg = bytes.subarray(9);
-    const blob = new Blob([jpeg], { type: "image/jpeg" });
-    const url = URL.createObjectURL(blob);
-    const img = $("remote-frame");
-    if (img) {
-      const previous = state.remoteObjectUrl;
-      img.onload = () => {
-        if (previous) URL.revokeObjectURL(previous);
-      };
-      img.src = url;
-      state.remoteObjectUrl = url;
-      setRemoteVisible(true);
-    }
-  }
-
   function handleControl(message) {
     sendEvent(message);
     if (message.type === "welcome") {
@@ -318,7 +218,6 @@ await (async function lessonSession() {
     } else if (message.type === "partner_left") {
       state.partnerPresent = false;
       stopRtc();
-      stopJpegFallback();
       clearRemote();
     } else if (message.type === "signal") {
       handleSignal(message).catch((err) =>
@@ -342,7 +241,6 @@ await (async function lessonSession() {
     const socketUrl = secureSocketUrl(cmd.url);
     await new Promise((resolve, reject) => {
       const ws = new WebSocket(socketUrl);
-      ws.binaryType = "arraybuffer";
       state.ws = ws;
       ws.onopen = () => {
         ws.send(JSON.stringify(cmd.join));
@@ -355,15 +253,12 @@ await (async function lessonSession() {
         sendEvent({ event: "status", message: "Disconnected from the studio server." });
       };
       ws.onmessage = (event) => {
-        if (typeof event.data === "string") {
-          try {
-            handleControl(JSON.parse(event.data));
-          } catch (err) {
-            sendEvent({ event: "error", message: String(err) });
-          }
-          return;
+        if (typeof event.data !== "string") return;
+        try {
+          handleControl(JSON.parse(event.data));
+        } catch (err) {
+          sendEvent({ event: "error", message: String(err) });
         }
-        handleBinary(event.data);
       };
     });
 
@@ -400,7 +295,6 @@ await (async function lessonSession() {
   }
 
   async function disconnect() {
-    stopJpegFallback();
     stopRtc();
     window.clearInterval(state.statsTimer);
     state.statsTimer = 0;

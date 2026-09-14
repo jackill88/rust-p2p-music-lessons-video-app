@@ -515,7 +515,6 @@ fn Lesson(
                 autoplay: true,
                 playsinline: true,
             }
-            img { id: "remote-frame", class: "remote-frame", alt: "Remote camera" }
             div { id: "remote-placeholder", class: "placeholder",
                 div {
                     p { "{status}" }

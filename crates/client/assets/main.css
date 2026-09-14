@@ -179,7 +179,6 @@ button:disabled {
   border: 1px solid var(--line);
 }
 
-.remote-frame,
 .remote-video,
 .local-preview {
   width: 100%;
@@ -189,7 +188,6 @@ button:disabled {
   background: #0c0907;
 }
 
-.remote-frame,
 .remote-video {
   position: absolute;
   inset: 0;

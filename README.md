@@ -12,7 +12,7 @@ The published port is the whole rendezvous. There is no extra discovery service:
 1. Launch `lesson-server` on the teacher PC, a studio PC, or a VPS.
 2. Publish **TCP 44041** (LAN firewall or router port-forward).
 3. Open Lesson Studio on two devices and enter the server IP (port stays `44041`).
-4. The first two people are paired. Camera frames and uncompressed studio audio (`48 kHz` stereo PCM) are relayed through that port.
+4. The first two people are paired. The server relays WebRTC signaling; camera and audio go peer-to-peer (H.264 / Opus).
 
 Use **headphones**. The mic is opened in music mode (no echo cancellation, noise suppression, or auto-gain) so piano and guitar keep their dynamics.
 
@@ -41,7 +41,7 @@ Android Studio + SDK are enough for the phone build; see [`android/README.md`](a
 
 ```
 crates/
-  protocol/  # join/chat messages and media packet layout
+  protocol/  # join/chat/WebRTC signal messages
   server/    # lesson-server binary
   client/    # Dioxus UI (PC, web, Android)
 android/     # APK scripts

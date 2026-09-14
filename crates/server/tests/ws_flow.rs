@@ -1,5 +1,5 @@
 use futures_util::{SinkExt, StreamExt};
-use lesson_protocol::{encode_audio, encode_video, ClientMessage, Instrument, Role, ServerMessage};
+use lesson_protocol::{ClientMessage, Instrument, Role, ServerMessage};
 use lesson_server::{app, LessonStudio};
 use std::sync::Arc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
@@ -41,7 +41,7 @@ fn join_payload(name: &str, role: Role, instrument: Instrument) -> String {
 }
 
 #[tokio::test]
-async fn two_clients_pair_and_relay_media() {
+async fn two_clients_pair_and_relay_signals() {
     let url = spawn_server().await;
 
     let (teacher_ws, _) = connect_async(&url).await.unwrap();
@@ -84,28 +84,6 @@ async fn two_clients_pair_and_relay_media() {
             assert_eq!(partner.instrument, Instrument::Guitar);
         }
         other => panic!("teacher should learn the student joined: {other:?}"),
-    }
-
-    let video = encode_video(10, 320, 180, b"fake-jpeg");
-    student_write
-        .send(Message::Binary(video.clone().into()))
-        .await
-        .unwrap();
-
-    match teacher_read.next().await {
-        Some(Ok(Message::Binary(payload))) => assert_eq!(&payload[..], video.as_slice()),
-        other => panic!("teacher should receive video bytes: {other:?}"),
-    }
-
-    let audio = encode_audio(20, 2, 48_000, &[1, 2, 3, 4]);
-    teacher_write
-        .send(Message::Binary(audio.clone().into()))
-        .await
-        .unwrap();
-
-    match student_read.next().await {
-        Some(Ok(Message::Binary(payload))) => assert_eq!(&payload[..], audio.as_slice()),
-        other => panic!("student should receive audio bytes: {other:?}"),
     }
 
     let signal = serde_json::to_string(&ClientMessage::Signal {
