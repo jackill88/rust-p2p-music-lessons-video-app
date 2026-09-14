@@ -113,6 +113,38 @@ patch_android_manifest() {
     sed -i 's/android:usesCleartextTraffic="false"/android:usesCleartextTraffic="true"/' "$manifest"
   fi
 
+  python3 - "$manifest" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+# Plugging in a USB charger often fires keyboard/uiMode/density config
+# changes. Without these flags Android recreates MainActivity and the
+# WebView lesson (camera + WebRTC) looks like a full app reset.
+config = (
+    "orientation|screenLayout|screenSize|smallestScreenSize|keyboardHidden|"
+    "keyboard|navigation|uiMode|density|fontScale|layoutDirection|locale|colorMode"
+)
+if 'android:configChanges="' in text:
+    text = re.sub(
+        r'android:configChanges="[^"]*"',
+        f'android:configChanges="{config}"',
+        text,
+        count=1,
+    )
+elif "<activity " in text:
+    text = text.replace(
+        "<activity ",
+        f'<activity android:configChanges="{config}" ',
+        1,
+    )
+if "android:launchMode=" not in text and "<activity " in text:
+    text = text.replace("<activity ", '<activity android:launchMode="singleTask" ', 1)
+path.write_text(text)
+PY
+
   echo "Patched AndroidManifest.xml with camera and microphone permissions."
 }
 

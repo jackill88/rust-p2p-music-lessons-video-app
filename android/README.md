@@ -73,6 +73,8 @@ Then use `127.0.0.1` and port `44041` in the app.
 
 **WebSocket fails on device** — `build.sh` patches `network_security_config.xml` so plain `ws://` works to LAN hosts.
 
+**App resets when plugging in a charger** — USB power can look like a keyboard/UI-mode change. `build.sh` now keeps the activity alive across those. Rebuild and reinstall the APK.
+
 **Camera / mic blocked** — The build patches `CAMERA`, `RECORD_AUDIO`, and `MODIFY_AUDIO_SETTINGS` into the generated manifest. Reinstall after `./android/build.sh`.
 
 **App not compatible on a phone** — Rebuild for arm64 (default). Use `--emulator` only for an x86_64 AVD.
