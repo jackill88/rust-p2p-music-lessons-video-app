@@ -78,10 +78,6 @@ struct BridgeEvent {
     #[serde(default)]
     text: String,
     #[serde(default)]
-    local: f32,
-    #[serde(default)]
-    remote: f32,
-    #[serde(default)]
     kbps: u32,
     #[serde(default)]
     fps: u32,
@@ -107,8 +103,7 @@ fn App() -> Element {
     let mut you = use_signal(|| None::<PeerInfo>);
     let mut muted = use_signal(|| false);
     let mut camera_on = use_signal(|| true);
-    let local_level = use_signal(|| 0.0f32);
-    let remote_level = use_signal(|| 0.0f32);
+    let mut levels_on = use_signal(|| true);
     let kbps = use_signal(|| 0u32);
     let fps = use_signal(|| 0u32);
     let mut chat_input = use_signal(String::new);
@@ -128,8 +123,6 @@ fn App() -> Element {
                     status,
                     partner,
                     you,
-                    local_level,
-                    remote_level,
                     kbps,
                     fps,
                     chat_log,
@@ -184,8 +177,7 @@ fn App() -> Element {
                         partner,
                         muted,
                         camera_on,
-                        local_level,
-                        remote_level,
+                        levels_on,
                         kbps,
                         fps,
                         chat_input,
@@ -197,6 +189,7 @@ fn App() -> Element {
                             you.set(None);
                             muted.set(false);
                             camera_on.set(true);
+                            levels_on.set(true);
                             chat_log.set(Vec::new());
                             feedback.set(String::new());
                             status.set("Disconnected.".into());
@@ -220,6 +213,17 @@ fn App() -> Element {
                             spawn(async move {
                                 let _ = document::eval(&format!(
                                     "if (window.__lessonSetCamera) {{ await window.__lessonSetCamera({next}); }}"
+                                ))
+                                .await;
+                            });
+                        },
+                        on_levels: move |_| {
+                            let next = !levels_on();
+                            levels_on.set(next);
+                            let _ = eval.send(serde_json::json!({ "op": "set_levels", "enabled": next }));
+                            spawn(async move {
+                                let _ = document::eval(&format!(
+                                    "if (window.__lessonSetLevels) {{ window.__lessonSetLevels({next}); }}"
                                 ))
                                 .await;
                             });
@@ -257,8 +261,6 @@ fn apply_bridge_event(
     mut status: Signal<String>,
     mut partner: Signal<Option<PeerInfo>>,
     mut you: Signal<Option<PeerInfo>>,
-    mut local_level: Signal<f32>,
-    mut remote_level: Signal<f32>,
     mut kbps: Signal<u32>,
     mut fps: Signal<u32>,
     mut chat_log: Signal<Vec<(String, String)>>,
@@ -271,11 +273,6 @@ fn apply_bridge_event(
     }
     if event.event == "status" {
         status.set(event.message);
-        return;
-    }
-    if event.event == "levels" {
-        local_level.set(event.local);
-        remote_level.set(event.remote);
         return;
     }
     if event.event == "feedback" {
@@ -504,8 +501,7 @@ fn Lesson(
     partner: Signal<Option<PeerInfo>>,
     muted: Signal<bool>,
     camera_on: Signal<bool>,
-    local_level: Signal<f32>,
-    remote_level: Signal<f32>,
+    levels_on: Signal<bool>,
     kbps: Signal<u32>,
     fps: Signal<u32>,
     chat_input: Signal<String>,
@@ -514,6 +510,7 @@ fn Lesson(
     on_leave: EventHandler<()>,
     on_mute: EventHandler<()>,
     on_camera: EventHandler<()>,
+    on_levels: EventHandler<()>,
     on_flip: EventHandler<()>,
     on_chat: EventHandler<()>,
 ) -> Element {
@@ -530,8 +527,6 @@ fn Lesson(
     let you_label = you()
         .map(|peer| format!("You · {} · {}", peer.role.label(), peer.instrument.label()))
         .unwrap_or_else(|| "You".into());
-    let local_pct = (local_level() * 100.0).clamp(0.0, 100.0);
-    let remote_pct = (remote_level() * 100.0).clamp(0.0, 100.0);
 
     rsx! {
         div { class: "stage",
@@ -547,7 +542,25 @@ fn Lesson(
                     p { class: "hint", "Point the camera at the keyboard or fretboard. Keep headphones on for studio-quality audio." }
                 }
             }
-            div { class: "badge", "{partner_label}" }
+            div { class: "stage-hud",
+                div { class: "badge", "{partner_label}" }
+                div {
+                    id: "level-meters",
+                    class: if levels_on() { "stage-meters" } else { "stage-meters is-hidden" },
+                    div { class: "meter",
+                        span { "You" }
+                        div { class: "track",
+                            div { id: "local-level-fill", class: "fill" }
+                        }
+                    }
+                    div { class: "meter",
+                        span { "Partner" }
+                        div { class: "track",
+                            div { id: "remote-level-fill", class: "fill" }
+                        }
+                    }
+                }
+            }
             div { id: "local-pip", class: "local-pip",
                 video {
                     id: "local-preview",
@@ -561,20 +574,6 @@ fn Lesson(
         }
         div { class: "status-bar",
             span { "{status} · {fps} fps · {kbps} kb/s" }
-            div { class: "meters",
-                div { class: "meter",
-                    span { "You" }
-                    div { class: "track",
-                        div { class: "fill", style: "width: {local_pct}%" }
-                    }
-                }
-                div { class: "meter",
-                    span { "Partner" }
-                    div { class: "track",
-                        div { class: "fill", style: "width: {remote_pct}%" }
-                    }
-                }
-            }
         }
         if !error().is_empty() {
             p { class: "error", "{error}" }
@@ -588,6 +587,9 @@ fn Lesson(
             }
             button { class: "secondary", onclick: move |_| on_camera.call(()),
                 if camera_on() { "Camera off" } else { "Camera on" }
+            }
+            button { class: "secondary", onclick: move |_| on_levels.call(()),
+                if levels_on() { "Levels off" } else { "Levels on" }
             }
             button { class: "secondary", onclick: move |_| on_flip.call(()), "Flip camera" }
             button { class: "secondary", onclick: move |_| on_leave.call(()), "Leave" }

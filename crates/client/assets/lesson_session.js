@@ -27,6 +27,10 @@ await (async function lessonSession() {
     feedbackHits: 0,
     feedbackQuiet: 0,
     feedbackActive: false,
+    levelsEnabled: true,
+    meterTimer: 0,
+    rtcLocalLevel: 0,
+    rtcRemoteLevel: 0,
   };
 
   function sendEvent(event) {
@@ -146,6 +150,10 @@ await (async function lessonSession() {
     return state.audioCtx;
   }
 
+  ["pointerdown", "touchstart", "click"].forEach((eventName) => {
+    window.addEventListener(eventName, ensureAudioContext, true);
+  });
+
   function disconnectTap(kind) {
     const sourceKey = kind === "remote" ? "remoteSource" : "localSource";
     if (state[sourceKey]) {
@@ -158,25 +166,28 @@ await (async function lessonSession() {
 
   function tapStream(kind, stream) {
     const ctx = ensureAudioContext();
-    const track = stream && stream.getAudioTracks()[0];
-    if (!ctx || !track) return;
+    if (!ctx || !stream || !stream.getAudioTracks().length) return;
     disconnectTap(kind);
-    const source = ctx.createMediaStreamSource(new MediaStream([track]));
-    const analyser = ctx.createAnalyser();
-    analyser.fftSize = 2048;
-    analyser.smoothingTimeConstant = 0.65;
-    source.connect(analyser);
-    if (kind === "remote") {
-      state.remoteSource = source;
-      state.remoteAnalyser = analyser;
-      state.remoteTime = new Uint8Array(analyser.fftSize);
-      state.remoteFreq = new Uint8Array(analyser.frequencyBinCount);
-    } else {
-      state.localSource = source;
-      state.localAnalyser = analyser;
-      state.localTime = new Uint8Array(analyser.fftSize);
-      state.localFreq = new Uint8Array(analyser.frequencyBinCount);
-    }
+    try {
+      const source = ctx.createMediaStreamSource(stream);
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 2048;
+      analyser.smoothingTimeConstant = 0.4;
+      source.connect(analyser);
+      const time = new Float32Array(analyser.fftSize);
+      const freq = new Uint8Array(analyser.frequencyBinCount);
+      if (kind === "remote") {
+        state.remoteSource = source;
+        state.remoteAnalyser = analyser;
+        state.remoteTime = time;
+        state.remoteFreq = freq;
+      } else {
+        state.localSource = source;
+        state.localAnalyser = analyser;
+        state.localTime = time;
+        state.localFreq = freq;
+      }
+    } catch (_) {}
   }
 
   function stopAudioMonitor() {
@@ -184,18 +195,40 @@ await (async function lessonSession() {
     disconnectTap("remote");
     state.localAnalyser = null;
     state.remoteAnalyser = null;
-    sendEvent({ event: "levels", local: 0, remote: 0 });
+    paintMeter("local-level-fill", 0);
+    paintMeter("remote-level-fill", 0);
     publishFeedback(false);
   }
 
   function timeRms(analyser, buffer) {
-    analyser.getByteTimeDomainData(buffer);
+    if (!analyser || !buffer) return 0;
+    analyser.getFloatTimeDomainData(buffer);
     let sum = 0;
     for (let i = 0; i < buffer.length; i++) {
-      const sample = (buffer[i] - 128) / 128;
+      const sample = buffer[i];
       sum += sample * sample;
     }
     return Math.sqrt(sum / buffer.length);
+  }
+
+  function displayLevel(rms, rtcLevel) {
+    const fromRms = Math.min(1, Math.pow(Math.max(0, rms) * 8, 0.65));
+    const fromRtc = Math.min(1, Math.max(0, rtcLevel) * 2.4);
+    return Math.max(fromRms, fromRtc);
+  }
+
+  function paintMeter(id, level) {
+    const fill = $(id);
+    if (fill) fill.style.width = `${Math.round(Math.max(0, Math.min(1, level)) * 100)}%`;
+  }
+
+  function sampleMeters() {
+    ensureAudioContext();
+    if (!state.levelsEnabled) return;
+    const localRms = timeRms(state.localAnalyser, state.localTime);
+    const remoteRms = timeRms(state.remoteAnalyser, state.remoteTime);
+    paintMeter("local-level-fill", state.muted ? 0 : displayLevel(localRms, state.rtcLocalLevel));
+    paintMeter("remote-level-fill", displayLevel(remoteRms, state.rtcRemoteLevel));
   }
 
   function bandRange(analyser) {
@@ -267,11 +300,6 @@ await (async function lessonSession() {
     const remoteAnalyser = state.remoteAnalyser;
     const remoteRms =
       remoteAnalyser && state.remoteTime ? timeRms(remoteAnalyser, state.remoteTime) : 0;
-    sendEvent({
-      event: "levels",
-      local: Math.min(1, localRms * 4.5),
-      remote: Math.min(1, remoteRms * 4.5),
-    });
 
     if (state.muted || !localAnalyser || !remoteAnalyser) {
       if (state.feedbackActive) publishFeedback(false);
@@ -477,6 +505,7 @@ await (async function lessonSession() {
     state.facing = cmd.facing || "environment";
     state.muted = false;
     state.cameraEnabled = true;
+    state.levelsEnabled = true;
     state.partnerPresent = false;
     state.stream = window.__lessonStream || null;
     if (!state.stream) {
@@ -526,6 +555,17 @@ await (async function lessonSession() {
               state.lastRtcBytes = received;
               state.lastRtcTime = now;
             }
+            if (typeof report.audioLevel === "number") {
+              if (report.type === "media-source" || (report.type === "outbound-rtp" && report.kind === "audio")) {
+                state.rtcLocalLevel = report.audioLevel;
+              }
+              if (
+                (report.type === "inbound-rtp" && report.kind === "audio") ||
+                report.remoteSource === true
+              ) {
+                state.rtcRemoteLevel = report.audioLevel;
+              }
+            }
           });
         } catch (_) {}
       }
@@ -540,6 +580,9 @@ await (async function lessonSession() {
         state.framesWindow = 0;
       }
     }, 1000);
+    window.clearInterval(state.meterTimer);
+    state.meterTimer = window.setInterval(sampleMeters, 120);
+    sampleMeters();
     await applyMediaFlags();
   }
 
@@ -547,6 +590,8 @@ await (async function lessonSession() {
     stopRtc();
     window.clearInterval(state.statsTimer);
     state.statsTimer = 0;
+    window.clearInterval(state.meterTimer);
+    state.meterTimer = 0;
     state.partnerPresent = false;
     if (state.ws) {
       try {
@@ -582,6 +627,17 @@ await (async function lessonSession() {
     state.cameraEnabled = asBool(enabled, true);
     return applyMediaFlags();
   };
+  window.__lessonSetLevels = (enabled) => {
+    state.levelsEnabled = asBool(enabled, true);
+    const meters = $("level-meters");
+    if (meters) meters.classList.toggle("is-hidden", !state.levelsEnabled);
+    if (!state.levelsEnabled) {
+      paintMeter("local-level-fill", 0);
+      paintMeter("remote-level-fill", 0);
+    } else {
+      sampleMeters();
+    }
+  };
 
   while (true) {
     const cmd = await dioxus.recv();
@@ -609,6 +665,8 @@ await (async function lessonSession() {
         }
       } else if (cmd.op === "use_stream") {
         await applyStream();
+      } else if (cmd.op === "set_levels") {
+        window.__lessonSetLevels(cmd.enabled);
       }
     } catch (err) {
       sendEvent({
