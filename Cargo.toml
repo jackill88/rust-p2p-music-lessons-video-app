@@ -1,0 +1,9 @@
+[workspace]
+resolver = "2"
+members = ["crates/protocol", "crates/client", "crates/server"]
+
+[workspace.dependencies]
+dioxus = { version = "0.7.1" }
+lesson-protocol = { path = "crates/protocol" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

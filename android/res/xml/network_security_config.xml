@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- Lesson Studio connects to a self-hosted ws:// server (often on a LAN IP). -->
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

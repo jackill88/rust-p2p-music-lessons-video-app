@@ -1,0 +1,21 @@
+[application]
+name = "Lesson Studio"
+
+[bundle]
+identifier = "com.lessonstudio.client"
+icon = []
+
+[web.app]
+title = "Lesson Studio"
+
+[web.watcher]
+watch_path = ["src", "assets"]
+
+[android]
+identifier = "com.lessonstudio.client"
+min_sdk = 24
+compile_sdk = 35
+target_sdk = 35
+
+[android.application]
+uses_cleartext_traffic = true
