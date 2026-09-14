@@ -9,6 +9,8 @@ await (async function lessonSession() {
     facing: "environment",
     muted: false,
     cameraEnabled: true,
+    audioSender: null,
+    videoSender: null,
     bytesWindow: 0,
     framesWindow: 0,
     lastRtcBytes: 0,
@@ -80,6 +82,43 @@ await (async function lessonSession() {
     });
   }
 
+  function asBool(value, fallback) {
+    if (value === true || value === 1 || value === "true" || value === "1") return true;
+    if (value === false || value === 0 || value === "false" || value === "0") return false;
+    return fallback;
+  }
+
+  function mediaStream() {
+    return window.__lessonStream || state.stream;
+  }
+
+  async function applyMediaFlags() {
+    const stream = mediaStream();
+    const audioTrack = stream ? stream.getAudioTracks()[0] : null;
+    const videoTrack = stream ? stream.getVideoTracks()[0] : null;
+    if (audioTrack) audioTrack.enabled = !state.muted;
+    if (videoTrack) videoTrack.enabled = state.cameraEnabled;
+
+    if (state.audioSender) {
+      try {
+        await state.audioSender.replaceTrack(state.muted ? null : audioTrack);
+      } catch (_) {
+        if (state.audioSender.track) {
+          state.audioSender.track.enabled = !state.muted;
+        }
+      }
+    }
+    if (state.videoSender) {
+      try {
+        await state.videoSender.replaceTrack(state.cameraEnabled ? videoTrack : null);
+      } catch (_) {
+        if (state.videoSender.track) {
+          state.videoSender.track.enabled = state.cameraEnabled;
+        }
+      }
+    }
+  }
+
   function preferH264(pc) {
     if (!pc || !window.RTCRtpSender || !RTCRtpSender.getCapabilities) return;
     const caps = RTCRtpSender.getCapabilities("video");
@@ -121,6 +160,8 @@ await (async function lessonSession() {
       } catch (_) {}
       state.pc = null;
     }
+    state.audioSender = null;
+    state.videoSender = null;
     state.usingRtc = false;
   }
 
@@ -135,9 +176,16 @@ await (async function lessonSession() {
       bundlePolicy: "max-bundle",
     });
     state.pc = pc;
-    state.stream.getTracks().forEach((track) => pc.addTrack(track, state.stream));
+    state.audioSender = null;
+    state.videoSender = null;
+    state.stream.getTracks().forEach((track) => {
+      const sender = pc.addTrack(track, state.stream);
+      if (track.kind === "audio") state.audioSender = sender;
+      if (track.kind === "video") state.videoSender = sender;
+    });
     preferH264(pc);
     await tuneSenders(pc);
+    await applyMediaFlags();
 
     pc.onicecandidate = (event) => {
       if (event.candidate) {
@@ -151,6 +199,7 @@ await (async function lessonSession() {
         video.srcObject = remote;
         video.autoplay = true;
         video.playsInline = true;
+        video.muted = false;
         video.play().catch(() => {});
       }
       state.usingRtc = true;
@@ -292,6 +341,7 @@ await (async function lessonSession() {
         state.framesWindow = 0;
       }
     }, 1000);
+    await applyMediaFlags();
   }
 
   async function disconnect() {
@@ -314,16 +364,23 @@ await (async function lessonSession() {
   async function applyStream() {
     state.stream = window.__lessonStream || state.stream;
     attachLocalPreview();
-    if (state.pc && state.stream) {
-      const videoTrack = state.stream.getVideoTracks()[0];
-      const sender = state.pc.getSenders().find((item) => item.track && item.track.kind === "video");
-      if (sender && videoTrack) {
-        try {
-          await sender.replaceTrack(videoTrack);
-        } catch (_) {}
-      }
+    const videoTrack = state.stream ? state.stream.getVideoTracks()[0] : null;
+    if (videoTrack && state.videoSender && state.cameraEnabled) {
+      try {
+        await state.videoSender.replaceTrack(videoTrack);
+      } catch (_) {}
     }
+    await applyMediaFlags();
   }
+
+  window.__lessonSetMuted = (muted) => {
+    state.muted = asBool(muted, true);
+    return applyMediaFlags();
+  };
+  window.__lessonSetCamera = (enabled) => {
+    state.cameraEnabled = asBool(enabled, true);
+    return applyMediaFlags();
+  };
 
   while (true) {
     const cmd = await dioxus.recv();
@@ -336,19 +393,15 @@ await (async function lessonSession() {
         window.__lessonStream = null;
         state.stream = null;
       } else if (cmd.op === "set_muted") {
-        state.muted = Boolean(cmd.muted);
-        if (state.stream) {
-          state.stream.getAudioTracks().forEach((track) => {
-            track.enabled = !state.muted;
-          });
-        }
+        state.muted = asBool(cmd.muted, !state.muted);
+        await applyMediaFlags();
+        sendEvent({
+          event: "status",
+          message: state.muted ? "Microphone muted." : "Microphone on.",
+        });
       } else if (cmd.op === "set_camera") {
-        state.cameraEnabled = Boolean(cmd.enabled);
-        if (state.stream) {
-          state.stream.getVideoTracks().forEach((track) => {
-            track.enabled = state.cameraEnabled;
-          });
-        }
+        state.cameraEnabled = asBool(cmd.enabled, !state.cameraEnabled);
+        await applyMediaFlags();
       } else if (cmd.op === "chat") {
         if (state.ws && state.ws.readyState === 1) {
           state.ws.send(JSON.stringify({ type: "chat", text: cmd.text || "" }));

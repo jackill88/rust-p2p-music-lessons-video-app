@@ -200,11 +200,23 @@ fn App() -> Element {
                             let next = !muted();
                             muted.set(next);
                             let _ = eval.send(serde_json::json!({ "op": "set_muted", "muted": next }));
+                            spawn(async move {
+                                let _ = document::eval(&format!(
+                                    "if (window.__lessonSetMuted) {{ await window.__lessonSetMuted({next}); }}"
+                                ))
+                                .await;
+                            });
                         },
                         on_camera: move |_| {
                             let next = !camera_on();
                             camera_on.set(next);
                             let _ = eval.send(serde_json::json!({ "op": "set_camera", "enabled": next }));
+                            spawn(async move {
+                                let _ = document::eval(&format!(
+                                    "if (window.__lessonSetCamera) {{ await window.__lessonSetCamera({next}); }}"
+                                ))
+                                .await;
+                            });
                         },
                         on_flip: move |_| {
                             spawn(async move {
