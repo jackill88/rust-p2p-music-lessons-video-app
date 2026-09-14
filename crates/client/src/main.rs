@@ -621,6 +621,8 @@ fn Lesson(
         .map(|peer| format!("You · {} · {}", peer.role.label(), peer.instrument.label()))
         .unwrap_or_else(|| "You".into());
     let gain_label = format!("{:.1}", mic_gain());
+    let mut tray_open = use_signal(|| false);
+    let tray_expanded = tray_open() || calibrating();
 
     rsx! {
         div { class: "stage",
@@ -694,38 +696,45 @@ fn Lesson(
             button { class: "secondary", onclick: move |_| on_flip.call(()), "Flip camera" }
             button { class: "secondary", onclick: move |_| on_leave.call(()), "Leave" }
         }
-        section { class: "card mic-card",
-            label { class: "field",
-                span { "Mic sensitivity · {gain_label}×" }
-                input {
-                    r#type: "range",
-                    min: "0.25",
-                    max: "4",
-                    step: "0.05",
-                    value: "{mic_gain}",
-                    disabled: calibrating(),
-                    oninput: move |event| {
-                        if let Ok(value) = event.value().parse::<f32>() {
-                            on_gain.call(value);
-                        }
-                    },
-                }
-            }
-            p { class: "hint",
-                "1.0× is the raw microphone. Raise it if the partner can barely hear you; lower it if loud notes clip."
-            }
+        div { class: if tray_expanded { "tray is-open" } else { "tray" },
             button {
-                class: "secondary",
-                disabled: calibrating() || muted(),
-                onclick: move |_| on_calibrate.call(()),
-                if calibrating() {
-                    "Now play loudly ({calibrate_remaining})"
-                } else {
-                    "Play loudly to set level"
-                }
+                class: "tray-handle",
+                onclick: move |_| tray_open.set(!tray_open()),
+                span { "Mic {gain_label}×" }
+                span { class: "tray-chevron", if tray_expanded { "Minimize" } else { "Settings" } }
             }
-            if !calibrate_note().is_empty() && !calibrating() {
-                p { class: "hint", "{calibrate_note}" }
+            if tray_expanded {
+                div { class: "tray-body",
+                    label { class: "field",
+                        span { "Sensitivity" }
+                        input {
+                            r#type: "range",
+                            min: "0.25",
+                            max: "4",
+                            step: "0.05",
+                            value: "{mic_gain}",
+                            disabled: calibrating(),
+                            oninput: move |event| {
+                                if let Ok(value) = event.value().parse::<f32>() {
+                                    on_gain.call(value);
+                                }
+                            },
+                        }
+                    }
+                    button {
+                        class: "secondary",
+                        disabled: calibrating() || muted(),
+                        onclick: move |_| on_calibrate.call(()),
+                        if calibrating() {
+                            "Now play loudly ({calibrate_remaining})"
+                        } else {
+                            "Play loudly to set level"
+                        }
+                    }
+                    if !calibrate_note().is_empty() && !calibrating() {
+                        p { class: "hint", "{calibrate_note}" }
+                    }
+                }
             }
         }
         section { class: "card chat",

@@ -41,6 +41,8 @@ await (async function lessonSession() {
     calibrating: false,
     calibrateTimer: 0,
     calibratePeak: 0,
+    remoteStream: null,
+    previewStream: null,
   };
 
   function sendEvent(event) {
@@ -75,10 +77,19 @@ await (async function lessonSession() {
 
   function attachLocalPreview() {
     const video = $("local-preview");
-    if (video && state.stream) {
-      video.srcObject = state.stream;
+    const stream = window.__lessonStream || state.stream;
+    const track = stream && stream.getVideoTracks()[0];
+    if (video && track && track.readyState !== "ended") {
+      if (!state.previewStream || state.previewStream.getVideoTracks()[0] !== track) {
+        state.previewStream = new MediaStream([track]);
+      }
+      if (video.srcObject !== state.previewStream) {
+        video.srcObject = state.previewStream;
+      }
       video.muted = true;
       video.playsInline = true;
+      video.setAttribute("playsinline", "");
+      video.setAttribute("autoplay", "");
       video.autoplay = true;
       video.play().catch(() => {});
     }
@@ -88,17 +99,55 @@ await (async function lessonSession() {
     }
   }
 
+  function bindRemoteVideo() {
+    const video = $("remote-video");
+    const remote = state.remoteStream;
+    if (!video || !remote || !remote.getVideoTracks().length) return;
+    if (video.srcObject !== remote) {
+      video.srcObject = remote;
+    }
+    video.autoplay = true;
+    video.playsInline = true;
+    video.muted = false;
+    video.setAttribute("playsinline", "");
+    video.classList.add("is-live");
+    video.play().catch(() => {});
+    setRemoteVisible(true);
+  }
+
   function setRemoteVisible(visible) {
     const video = $("remote-video");
     const placeholder = $("remote-placeholder");
-    if (video) video.style.display = visible ? "block" : "none";
-    if (placeholder) placeholder.style.display = visible ? "none" : "grid";
+    if (video) {
+      video.classList.toggle("is-live", visible);
+      video.style.display = visible ? "block" : "none";
+    }
+    if (placeholder) {
+      placeholder.classList.toggle("is-hidden", visible);
+      placeholder.style.display = visible ? "none" : "grid";
+    }
   }
 
   function clearRemote() {
     const video = $("remote-video");
-    if (video) video.srcObject = null;
+    state.remoteStream = null;
+    if (video) {
+      video.srcObject = null;
+      video.classList.remove("is-live");
+    }
     setRemoteVisible(false);
+  }
+
+  function audioOnlyStream(stream) {
+    if (!stream) return null;
+    const tracks = stream.getAudioTracks().filter((track) => track.readyState !== "ended");
+    if (!tracks.length) return null;
+    return new MediaStream(tracks);
+  }
+
+  function ensureVideoBindings() {
+    attachLocalPreview();
+    if (state.remoteStream) bindRemoteVideo();
   }
 
   function rtcUnavailable(reason) {
@@ -244,7 +293,9 @@ await (async function lessonSession() {
     if (!ctx || !stream || !stream.getAudioTracks().length) return;
     teardownLocalGraph();
     try {
-      const source = ctx.createMediaStreamSource(stream);
+      const audioStream = audioOnlyStream(stream);
+      if (!audioStream) return;
+      const source = ctx.createMediaStreamSource(audioStream);
       const preAnalyser = ctx.createAnalyser();
       preAnalyser.fftSize = 2048;
       preAnalyser.smoothingTimeConstant = 0;
@@ -384,10 +435,11 @@ await (async function lessonSession() {
 
   function tapStream(kind, stream) {
     const ctx = ensureAudioContext();
-    if (!ctx || !stream || !stream.getAudioTracks().length) return;
+    const audioStream = audioOnlyStream(stream);
+    if (!ctx || !audioStream) return;
     disconnectTap(kind);
     try {
-      const source = ctx.createMediaStreamSource(stream);
+      const source = ctx.createMediaStreamSource(audioStream);
       const analyser = ctx.createAnalyser();
       analyser.fftSize = 2048;
       analyser.smoothingTimeConstant = 0.4;
@@ -615,12 +667,15 @@ await (async function lessonSession() {
     state.videoSender = null;
     buildLocalAudioGraph();
     const videoTrack = state.stream.getVideoTracks()[0];
-    if (videoTrack) {
-      state.videoSender = pc.addTrack(videoTrack, state.stream);
-    }
     const audioTrack = outgoingAudioTrack();
+    const sendStream = new MediaStream();
+    if (videoTrack) sendStream.addTrack(videoTrack);
+    if (audioTrack) sendStream.addTrack(audioTrack);
+    if (videoTrack) {
+      state.videoSender = pc.addTrack(videoTrack, sendStream);
+    }
     if (audioTrack) {
-      state.audioSender = pc.addTrack(audioTrack, state.processedStream || state.stream);
+      state.audioSender = pc.addTrack(audioTrack, sendStream);
     }
     preferH264(pc);
     await tuneSenders(pc);
@@ -632,18 +687,18 @@ await (async function lessonSession() {
       }
     };
     pc.ontrack = (event) => {
-      const remote = event.streams[0] || new MediaStream([event.track]);
-      const video = $("remote-video");
-      if (video) {
-        video.srcObject = remote;
-        video.autoplay = true;
-        video.playsInline = true;
-        video.muted = false;
-        video.play().catch(() => {});
+      if (event.streams && event.streams[0]) {
+        state.remoteStream = event.streams[0];
+      } else {
+        if (!state.remoteStream) state.remoteStream = new MediaStream();
+        if (event.track && !state.remoteStream.getTracks().includes(event.track)) {
+          state.remoteStream.addTrack(event.track);
+        }
       }
       state.usingRtc = true;
-      setRemoteVisible(true);
-      tapStream("remote", remote);
+      bindRemoteVideo();
+      const remoteAudio = audioOnlyStream(state.remoteStream);
+      if (remoteAudio) tapStream("remote", remoteAudio);
       sendEvent({ event: "status", message: "Live peer-to-peer (WebRTC)." });
     };
     pc.onconnectionstatechange = () => {
@@ -804,8 +859,11 @@ await (async function lessonSession() {
       }
     }, 1000);
     window.clearInterval(state.meterTimer);
-    state.meterTimer = window.setInterval(sampleMeters, 120);
-    sampleMeters();
+    state.meterTimer = window.setInterval(() => {
+      ensureVideoBindings();
+      sampleMeters();
+    }, 120);
+    ensureVideoBindings();
     await applyMediaFlags();
   }
 
@@ -831,6 +889,7 @@ await (async function lessonSession() {
 
   async function applyStream() {
     state.stream = window.__lessonStream || state.stream;
+    state.previewStream = null;
     attachLocalPreview();
     buildLocalAudioGraph();
     const videoTrack = state.stream ? state.stream.getVideoTracks()[0] : null;
