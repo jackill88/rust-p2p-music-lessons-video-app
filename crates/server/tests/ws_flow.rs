@@ -12,11 +12,14 @@ async fn recv_server_message(
     >,
 ) -> ServerMessage {
     loop {
-        let Some(Ok(Message::Text(text))) = read.next().await else {
-            panic!("websocket closed before server message");
-        };
-        if let Ok(message) = serde_json::from_str::<ServerMessage>(&text) {
-            return message;
+        match read.next().await {
+            Some(Ok(Message::Text(text))) => {
+                if let Ok(message) = serde_json::from_str::<ServerMessage>(&text) {
+                    return message;
+                }
+            }
+            Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
+            other => panic!("websocket closed before server message: {other:?}"),
         }
     }
 }
@@ -109,18 +112,182 @@ async fn two_clients_pair_and_relay_signals() {
 async fn third_client_is_rejected() {
     let url = spawn_server().await;
 
-    let (first, _) = connect_async(&url).await.unwrap();
-    let (second, _) = connect_async(&url).await.unwrap();
-    let (third, _) = connect_async(&url).await.unwrap();
-    let (_first_write, _first_read) = first.split();
-    let (_second_write, _second_read) = second.split();
-    let (_third_write, mut third_read) = third.split();
+    let (first_ws, _) = connect_async(&url).await.unwrap();
+    let (mut first_write, mut first_read) = first_ws.split();
+    first_write
+        .send(Message::Text(
+            join_payload("Maya", Role::Teacher, Instrument::Piano).into(),
+        ))
+        .await
+        .unwrap();
+    assert!(matches!(
+        recv_server_message(&mut first_read).await,
+        ServerMessage::Welcome { .. }
+    ));
+
+    let (second_ws, _) = connect_async(&url).await.unwrap();
+    let (mut second_write, mut second_read) = second_ws.split();
+    second_write
+        .send(Message::Text(
+            join_payload("Leo", Role::Student, Instrument::Guitar).into(),
+        ))
+        .await
+        .unwrap();
+    assert!(matches!(
+        recv_server_message(&mut second_read).await,
+        ServerMessage::Welcome { .. }
+    ));
+    assert!(matches!(
+        recv_server_message(&mut first_read).await,
+        ServerMessage::PartnerJoined { .. }
+    ));
+
+    let (third_ws, _) = connect_async(&url).await.unwrap();
+    let (mut third_write, mut third_read) = third_ws.split();
+    third_write
+        .send(Message::Text(
+            join_payload("Ada", Role::Student, Instrument::Piano).into(),
+        ))
+        .await
+        .unwrap();
 
     match recv_server_message(&mut third_read).await {
         ServerMessage::Error { message } => {
             assert!(message.contains("two people"), "{message}");
         }
         other => panic!("third client should be rejected: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn same_name_reclaims_a_stale_seat() {
+    let url = spawn_server().await;
+
+    let (teacher_ws, _) = connect_async(&url).await.unwrap();
+    let (mut teacher_write, mut teacher_read) = teacher_ws.split();
+    teacher_write
+        .send(Message::Text(
+            join_payload("Maya", Role::Teacher, Instrument::Piano).into(),
+        ))
+        .await
+        .unwrap();
+    assert!(matches!(
+        recv_server_message(&mut teacher_read).await,
+        ServerMessage::Welcome { partner: None, .. }
+    ));
+
+    let (student_ws, _) = connect_async(&url).await.unwrap();
+    let (mut student_write, mut student_read) = student_ws.split();
+    student_write
+        .send(Message::Text(
+            join_payload("Leo", Role::Student, Instrument::Guitar).into(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        recv_server_message(&mut student_read).await,
+        ServerMessage::Welcome {
+            you: lesson_protocol::PeerInfo {
+                name: "Leo".into(),
+                role: Role::Student,
+                instrument: Instrument::Guitar,
+            },
+            partner: Some(lesson_protocol::PeerInfo {
+                name: "Maya".into(),
+                role: Role::Teacher,
+                instrument: Instrument::Piano,
+            }),
+        }
+    );
+    assert!(matches!(
+        recv_server_message(&mut teacher_read).await,
+        ServerMessage::PartnerJoined { .. }
+    ));
+
+    let (teacher_again_ws, _) = connect_async(&url).await.unwrap();
+    let (mut teacher_again_write, mut teacher_again_read) = teacher_again_ws.split();
+    teacher_again_write
+        .send(Message::Text(
+            join_payload("maya", Role::Teacher, Instrument::Piano).into(),
+        ))
+        .await
+        .unwrap();
+
+    match recv_server_message(&mut teacher_again_read).await {
+        ServerMessage::Welcome { partner, you } => {
+            assert_eq!(you.name, "maya");
+            assert_eq!(partner.unwrap().name, "Leo");
+        }
+        other => panic!("reconnecting teacher should be welcomed: {other:?}"),
+    }
+
+    match recv_server_message(&mut student_read).await {
+        ServerMessage::PartnerJoined { partner } => {
+            assert_eq!(partner.name, "maya");
+        }
+        other => panic!("student should see the teacher return: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn leave_message_frees_the_seat() {
+    let url = spawn_server().await;
+
+    let (teacher_ws, _) = connect_async(&url).await.unwrap();
+    let (mut teacher_write, mut teacher_read) = teacher_ws.split();
+    teacher_write
+        .send(Message::Text(
+            join_payload("Maya", Role::Teacher, Instrument::Piano).into(),
+        ))
+        .await
+        .unwrap();
+    assert!(matches!(
+        recv_server_message(&mut teacher_read).await,
+        ServerMessage::Welcome { .. }
+    ));
+
+    let (student_ws, _) = connect_async(&url).await.unwrap();
+    let (mut student_write, mut student_read) = student_ws.split();
+    student_write
+        .send(Message::Text(
+            join_payload("Leo", Role::Student, Instrument::Guitar).into(),
+        ))
+        .await
+        .unwrap();
+    assert!(matches!(
+        recv_server_message(&mut student_read).await,
+        ServerMessage::Welcome { .. }
+    ));
+    assert!(matches!(
+        recv_server_message(&mut teacher_read).await,
+        ServerMessage::PartnerJoined { .. }
+    ));
+
+    teacher_write
+        .send(Message::Text(
+            serde_json::to_string(&ClientMessage::Leave).unwrap().into(),
+        ))
+        .await
+        .unwrap();
+    match recv_server_message(&mut student_read).await {
+        ServerMessage::PartnerLeft => {}
+        other => panic!("student should see the teacher leave: {other:?}"),
+    }
+
+    let (replacement_ws, _) = connect_async(&url).await.unwrap();
+    let (mut replacement_write, mut replacement_read) = replacement_ws.split();
+    replacement_write
+        .send(Message::Text(
+            join_payload("Ada", Role::Teacher, Instrument::Piano).into(),
+        ))
+        .await
+        .unwrap();
+    match recv_server_message(&mut replacement_read).await {
+        ServerMessage::Welcome { partner, you } => {
+            assert_eq!(you.name, "Ada");
+            assert_eq!(partner.unwrap().name, "Leo");
+        }
+        other => panic!("leave should free a seat: {other:?}"),
     }
 }
 

@@ -53,6 +53,7 @@ pub enum ClientMessage {
     Chat {
         text: String,
     },
+    Leave,
     Signal {
         kind: String,
         #[serde(default)]

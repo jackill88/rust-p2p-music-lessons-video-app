@@ -13,8 +13,9 @@ use axum::{
 use futures_util::{SinkExt, StreamExt};
 use lesson_protocol::{ClientMessage, DEFAULT_PORT};
 use std::sync::Arc;
-use studio::{Outbound, Studio};
+use studio::{JoinOutcome, Outbound, Studio};
 use tokio::sync::mpsc;
+use tokio::time::{interval_at, timeout, Duration, Instant, MissedTickBehavior};
 use tower_http::cors::CorsLayer;
 
 pub use studio::Studio as LessonStudio;
@@ -74,6 +75,7 @@ async fn index_page() -> Html<String> {
 pub async fn handle_socket(socket: WebSocket, studio: Arc<Studio>) {
     let (mut sender, mut receiver) = socket.split();
     let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<Outbound>();
+    let ping_tx = outbound_tx.clone();
 
     let Some(mut session) = studio.register(outbound_tx).await else {
         tracing::warn!("studio is full; rejecting extra client");
@@ -87,56 +89,106 @@ pub async fn handle_socket(socket: WebSocket, studio: Arc<Studio>) {
         return;
     };
 
-    let write_task = tokio::spawn(async move {
-        while let Some(Outbound::Text(text)) = outbound_rx.recv().await {
-            if sender.send(Message::Text(text.into())).await.is_err() {
+    let mut write_task = tokio::spawn(async move {
+        while let Some(message) = outbound_rx.recv().await {
+            let ws_message = match message {
+                Outbound::Text(text) => Message::Text(text.into()),
+                Outbound::Ping => Message::Ping(vec![].into()),
+            };
+            if sender.send(ws_message).await.is_err() {
                 break;
             }
         }
     });
 
-    while let Some(Ok(message)) = receiver.next().await {
-        match message {
-            Message::Text(text) => match serde_json::from_str::<ClientMessage>(&text) {
-                Ok(ClientMessage::Join {
-                    name,
-                    role,
-                    instrument,
-                }) => {
-                    tracing::info!(%name, ?role, ?instrument, "client joined the studio");
-                    studio
-                        .join(
-                            &mut session,
-                            lesson_protocol::PeerInfo {
-                                name,
-                                role,
-                                instrument,
-                            },
-                        )
-                        .await;
+    let mut last_seen = Instant::now();
+    let mut ping_ticks = interval_at(
+        Instant::now() + studio.ping_interval(),
+        studio.ping_interval(),
+    );
+    ping_ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
+
+    loop {
+        tokio::select! {
+            _ = &mut write_task => break,
+            _ = &mut session.shutdown_rx => {
+                tracing::info!("session replaced by a reconnect");
+                break;
+            }
+            _ = ping_ticks.tick() => {
+                if last_seen.elapsed() >= studio.idle_timeout() {
+                    tracing::info!("dropping idle studio connection");
+                    break;
                 }
-                Ok(ClientMessage::Chat { text }) => {
-                    studio.chat(&session, text).await;
+                let _ = ping_tx.send(Outbound::Ping);
+            }
+            message = receiver.next() => match message {
+                Some(Ok(Message::Text(text))) => {
+                    last_seen = Instant::now();
+                    match serde_json::from_str::<ClientMessage>(&text) {
+                        Ok(ClientMessage::Join {
+                            name,
+                            role,
+                            instrument,
+                        }) => {
+                            tracing::info!(%name, ?role, ?instrument, "client joined the studio");
+                            match studio
+                                .join(
+                                    &mut session,
+                                    lesson_protocol::PeerInfo {
+                                        name,
+                                        role,
+                                        instrument,
+                                    },
+                                )
+                                .await
+                            {
+                                JoinOutcome::Joined => {}
+                                JoinOutcome::StudioFull => {
+                                    studio.send_error(
+                                        &session,
+                                        "This studio already has two people. Wait for a seat or start the server on another host.".into(),
+                                    )
+                                    .await;
+                                    break;
+                                }
+                            }
+                        }
+                        Ok(ClientMessage::Chat { text }) => {
+                            studio.chat(&session, text).await;
+                        }
+                        Ok(ClientMessage::Leave) => break,
+                        Ok(ClientMessage::Signal {
+                            kind,
+                            sdp,
+                            candidate,
+                        }) => {
+                            studio.signal(&session, kind, sdp, candidate).await;
+                        }
+                        Err(err) => {
+                            tracing::warn!(error = %err, payload = %text, "invalid client message");
+                            studio.send_error(&session, format!("Invalid message: {err}")).await;
+                        }
+                    }
                 }
-                Ok(ClientMessage::Signal {
-                    kind,
-                    sdp,
-                    candidate,
-                }) => {
-                    studio.signal(&session, kind, sdp, candidate).await;
+                Some(Ok(Message::Pong(_))) | Some(Ok(Message::Ping(_))) => {
+                    last_seen = Instant::now();
                 }
-                Err(err) => {
-                    tracing::warn!(error = %err, payload = %text, "invalid client message");
-                    studio.send_error(&session, format!("Invalid message: {err}"));
-                }
+                Some(Ok(Message::Binary(_))) => {}
+                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
             },
-            Message::Close(_) => break,
-            Message::Binary(_) | Message::Ping(_) | Message::Pong(_) => {}
         }
     }
 
+    drop(ping_tx);
     studio.disconnect(&mut session).await;
-    let _ = write_task.await;
+    if timeout(Duration::from_millis(200), &mut write_task)
+        .await
+        .is_err()
+    {
+        write_task.abort();
+        let _ = write_task.await;
+    }
 }
 
 async fn ws_handler(ws: WebSocketUpgrade, State(studio): State<Arc<Studio>>) -> impl IntoResponse {

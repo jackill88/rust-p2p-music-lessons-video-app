@@ -301,6 +301,9 @@ await (async function lessonSession() {
     state.partnerPresent = false;
     if (state.ws) {
       try {
+        if (state.ws.readyState === 1) {
+          state.ws.send(JSON.stringify({ type: "leave" }));
+        }
         state.ws.close();
       } catch (_) {}
       state.ws = null;

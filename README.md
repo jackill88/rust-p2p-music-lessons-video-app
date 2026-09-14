@@ -127,7 +127,7 @@ Camera access in a browser only works on a secure origin (usually `http://127.0.
 4. Flip camera on a phone to show the keyboard or fretboard.
 5. Use the chat line for bar numbers and short notes.
 
-A third client is rejected until someone leaves.
+A third client is rejected until someone leaves. If Leave does not reach the server (Wi-Fi change, sleep, etc.), join again with the **same name** — that reclaims your seat. Dropped sockets are also cleared after a few seconds of silence.
 
 ## Quick local test
 
