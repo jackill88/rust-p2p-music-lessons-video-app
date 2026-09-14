@@ -35,8 +35,9 @@ pub fn build_server_url(host: &str, port: &str) -> Result<String, String> {
 
     if host.starts_with("ws://") || host.starts_with("wss://") {
         let url = host.trim_end_matches('/');
+        let url = url.replacen("ws://", "wss://", 1);
         return Ok(if url.ends_with("/ws") {
-            url.to_string()
+            url
         } else {
             format!("{url}/ws")
         });
@@ -49,7 +50,7 @@ pub fn build_server_url(host: &str, port: &str) -> Result<String, String> {
         return Err("Enter the server port".into());
     }
     let port: u16 = port.parse().map_err(|_| format!("Invalid port: {port}"))?;
-    Ok(format!("ws://{host}:{port}/ws"))
+    Ok(format!("wss://{host}:{port}/ws"))
 }
 
 #[derive(Serialize)]
@@ -174,6 +175,7 @@ fn App() -> Element {
                 Screen::Lesson => rsx! {
                     Lesson {
                         status,
+                        error,
                         you,
                         partner,
                         muted,
@@ -244,7 +246,8 @@ fn apply_bridge_event(
     mut chat_log: Signal<Vec<(String, String)>>,
 ) {
     if event.event == "error" || event.msg_type == "error" {
-        error.set(event.message);
+        error.set(event.message.clone());
+        status.set(event.message);
         return;
     }
     if event.event == "status" {
@@ -471,6 +474,7 @@ fn Lobby(
 #[component]
 fn Lesson(
     status: Signal<String>,
+    error: Signal<String>,
     you: Signal<Option<PeerInfo>>,
     partner: Signal<Option<PeerInfo>>,
     muted: Signal<bool>,
@@ -541,6 +545,9 @@ fn Lesson(
                 }
             }
         }
+        if !error().is_empty() {
+            p { class: "error", "{error}" }
+        }
         div { class: "toolbar",
             button { class: "secondary", onclick: move |_| on_mute.call(()),
                 if muted() { "Unmute" } else { "Mute" }
@@ -582,7 +589,7 @@ mod tests {
     fn builds_ws_url_from_ip_and_default_port() {
         assert_eq!(
             build_server_url("192.168.1.10", "44041").unwrap(),
-            "ws://192.168.1.10:44041/ws"
+            "wss://192.168.1.10:44041/ws"
         );
     }
 
@@ -590,7 +597,7 @@ mod tests {
     fn accepts_full_websocket_url() {
         assert_eq!(
             build_server_url("ws://10.0.0.2:44041", "1").unwrap(),
-            "ws://10.0.0.2:44041/ws"
+            "wss://10.0.0.2:44041/ws"
         );
     }
 }

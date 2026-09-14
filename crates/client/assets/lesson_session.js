@@ -18,6 +18,18 @@ await (async function lessonSession() {
     dioxus.send(event);
   }
 
+  function secureSocketUrl(url) {
+    if (!url) return url;
+    const pageIsSecure =
+      typeof location !== "undefined" &&
+      location.protocol !== "http:" &&
+      location.protocol !== "ws:";
+    if (pageIsSecure && url.indexOf("ws://") === 0) {
+      return "wss://" + url.slice("ws://".length);
+    }
+    return url;
+  }
+
   function $(id) {
     return document.getElementById(id);
   }
@@ -328,11 +340,10 @@ await (async function lessonSession() {
       throw new Error("Camera and microphone were not started");
     }
     attachLocalPreview();
-    await startCapture();
-    startVideoPump();
 
+    const socketUrl = secureSocketUrl(cmd.url);
     await new Promise((resolve, reject) => {
-      const ws = new WebSocket(cmd.url);
+      const ws = new WebSocket(socketUrl);
       ws.binaryType = "arraybuffer";
       state.ws = ws;
       ws.onopen = () => {
@@ -340,7 +351,8 @@ await (async function lessonSession() {
         sendEvent({ event: "status", message: "Connected to the studio server." });
         resolve();
       };
-      ws.onerror = () => reject(new Error("Could not reach the studio server"));
+      ws.onerror = () =>
+        reject(new Error("Could not reach the studio server at " + socketUrl));
       ws.onclose = () => {
         sendEvent({ event: "status", message: "Disconnected from the studio server." });
       };
@@ -356,6 +368,16 @@ await (async function lessonSession() {
         handleBinary(event.data);
       };
     });
+
+    try {
+      await startCapture();
+    } catch (err) {
+      sendEvent({
+        event: "error",
+        message: "Connected, but studio audio failed: " + String(err && err.message ? err.message : err),
+      });
+    }
+    startVideoPump();
 
     window.clearInterval(state.statsTimer);
     state.statsTimer = window.setInterval(() => {

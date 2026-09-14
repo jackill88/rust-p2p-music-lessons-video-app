@@ -1,4 +1,5 @@
 mod studio;
+mod tls;
 
 use axum::{
     extract::{
@@ -18,6 +19,7 @@ use tokio::sync::mpsc;
 use tower_http::cors::CorsLayer;
 
 pub use studio::Studio as LessonStudio;
+pub use tls::self_signed_pem;
 pub const LISTEN_PORT: u16 = DEFAULT_PORT;
 
 pub fn app(studio: Arc<Studio>) -> Router {
@@ -75,6 +77,7 @@ pub async fn handle_socket(socket: WebSocket, studio: Arc<Studio>) {
     let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<Outbound>();
 
     let Some(mut session) = studio.register(outbound_tx).await else {
+        tracing::warn!("studio is full; rejecting extra client");
         let payload = serde_json::json!({
             "type": "error",
             "message": "This studio already has two people. Wait for a seat or start the server on another host."
@@ -105,6 +108,7 @@ pub async fn handle_socket(socket: WebSocket, studio: Arc<Studio>) {
                     role,
                     instrument,
                 }) => {
+                    tracing::info!(%name, ?role, ?instrument, "client joined the studio");
                     studio
                         .join(
                             &mut session,

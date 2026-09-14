@@ -63,11 +63,12 @@ dx build "${DX_FLAGS[@]}"
 APP_DIR="$(find_android_app_dir "$PROFILE")"
 patch_network_security_config "$APP_DIR"
 patch_android_manifest "$APP_DIR"
+patch_webview_ssl "$APP_DIR"
 if (( RELEASE )); then
   disable_release_lint "$APP_DIR"
 fi
 
-echo "Rebuilding APK with camera, microphone, and LAN WebSocket support..."
+echo "Rebuilding APK with camera, microphone, and LAN WSS support..."
 (cd "$APP_DIR" && ./gradlew "$GRADLE_TASK")
 
 copy_apk_to_dist "$APP_DIR" "$VARIANT"

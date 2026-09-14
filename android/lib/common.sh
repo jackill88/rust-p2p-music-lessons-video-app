@@ -115,6 +115,44 @@ patch_android_manifest() {
   echo "Patched AndroidManifest.xml with camera and microphone permissions."
 }
 
+patch_webview_ssl() {
+  local app_dir="$1"
+  local file
+  file="$(find "$app_dir" -name 'RustWebViewClient.kt' -print -quit 2>/dev/null || true)"
+  if [[ -z "$file" ]]; then
+    echo "warning: RustWebViewClient.kt not found; self-signed wss:// may fail on the phone."
+    return 0
+  fi
+  if grep -q "onReceivedSslError" "$file"; then
+    echo "WebView already accepts the studio TLS certificate."
+    return 0
+  fi
+  python3 - "$file" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+text = path.read_text()
+if "import android.net.http.SslError" not in text:
+    text = text.replace("import android.net.Uri\n", "import android.net.Uri\nimport android.net.http.SslError\n")
+method = '''
+    override fun onReceivedSslError(
+        view: WebView?,
+        handler: SslErrorHandler?,
+        error: SslError?
+    ) {
+        // Lesson Studio speaks WSS with a LAN self-signed certificate.
+        handler?.proceed()
+    }
+
+'''
+needle = "    companion object {"
+if needle not in text:
+    raise SystemExit(f"could not patch {path}: companion object not found")
+path.write_text(text.replace(needle, method + needle, 1))
+PY
+  echo "Patched WebView to accept the studio TLS certificate (wss://)."
+}
+
 ensure_manifest_permission() {
   local manifest="$1"
   local permission="$2"

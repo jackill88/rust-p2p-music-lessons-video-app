@@ -1,5 +1,6 @@
+use axum_server::tls_rustls::RustlsConfig;
 use lesson_protocol::DEFAULT_PORT;
-use lesson_server::{app, LessonStudio};
+use lesson_server::{app, self_signed_pem, LessonStudio};
 use std::{
     net::{IpAddr, SocketAddr},
     sync::Arc,
@@ -20,16 +21,25 @@ async fn main() {
         .unwrap_or(DEFAULT_PORT);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    let advertised = advertised_addresses();
+    let (cert_pem, key_pem) =
+        self_signed_pem(&advertised).expect("generate studio TLS certificate");
+    let tls = RustlsConfig::from_pem(cert_pem.into_bytes(), key_pem.into_bytes())
+        .await
+        .expect("load studio TLS certificate");
+
     let studio = Arc::new(LessonStudio::new());
 
-    tracing::info!("Lesson Studio listening on {addr}");
-    tracing::info!("Publish TCP port {port} and connect clients to <server-ip>:{port}");
-    for advertised in advertised_addresses() {
-        tracing::info!("Reachable at {advertised}:{port}");
+    tracing::info!("Lesson Studio listening on https://{addr}");
+    tracing::info!("Publish TCP port {port}; clients connect with the server IP (WSS)");
+    for ip in &advertised {
+        tracing::info!("Reachable at https://{ip}:{port}  (wss://{ip}:{port}/ws)");
     }
 
-    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-    axum::serve(listener, app(studio)).await.unwrap();
+    axum_server::bind_rustls(addr, tls)
+        .serve(app(studio).into_make_service())
+        .await
+        .unwrap();
 }
 
 fn advertised_addresses() -> Vec<IpAddr> {

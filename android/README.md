@@ -1,6 +1,6 @@
 # Android build
 
-Build the Lesson Studio **client** as an Android APK using [Dioxus 0.7](https://dioxuslabs.com/) mobile support. The **server** still runs separately on Ubuntu or Windows; the phone connects over Wi-Fi using `ws://<server-ip>:44041/ws`.
+Build the Lesson Studio **client** as an Android APK using [Dioxus 0.7](https://dioxuslabs.com/) mobile support. The **server** still runs separately on Ubuntu or Windows; the phone connects over Wi-Fi using `wss://<server-ip>:44041/ws`.
 
 ## Prerequisites
 

@@ -55,7 +55,7 @@ From the project root:
 cargo run -p lesson-server --release
 ```
 
-The server listens on **all interfaces** (`0.0.0.0`) on port **44041**.
+The server listens on **all interfaces** (`0.0.0.0`) on port **44041** using **HTTPS / WSS** (the Android app is an HTTPS page, so it cannot use plain `ws://`).
 
 ```bash
 LESSON_PORT=44041 cargo run -p lesson-server --release
@@ -71,9 +71,15 @@ cargo run -p lesson-server --release
 You should see log lines like:
 
 ```
-Lesson Studio listening on 0.0.0.0:44041
-Publish TCP port 44041 and connect clients to <server-ip>:44041
-Reachable at 192.168.1.10:44041
+Lesson Studio listening on https://0.0.0.0:44041
+Publish TCP port 44041; clients connect with the server IP (WSS)
+Reachable at https://192.168.1.10:44041  (wss://192.168.1.10:44041/ws)
+```
+
+The certificate is self-signed for LAN use. A health check from this PC:
+
+```bash
+curl -k https://127.0.0.1:44041/health
 ```
 
 ### Publish the port
